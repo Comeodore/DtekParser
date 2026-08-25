@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <meta name="color-scheme" content="dark light">
+    <title>DTEK Status</title>
+    <script src="https://telegram.org/js/telegram-web-app.js?v=8.0"></script>
+    <style>
+        :root {
+            --app-bg: var(--tg-theme-bg-color, #1c1c1e);
+            --card-bg: var(--tg-theme-secondary-bg-color, #2c2c2e);
+            --text-primary: var(--tg-theme-text-color, #fff);
+            --text-secondary: var(--tg-theme-hint-color, #98989f);
+            --accent: var(--tg-theme-button-color, #0a84ff);
+            --accent-text: var(--tg-theme-button-text-color, #fff);
+            --divider: rgba(84, 84, 88, 0.35);
+            --status-on: #30d158;
+            --status-off: #ff453a;
+            --power-on: #5ab56a;
+            --power-off: #d06058;
+            --radius-lg: 14px;
+            --radius-md: 10px;
+            --radius-sm: 6px;
+            --spacing-xs: 4px;
+            --spacing-sm: 8px;
+            --spacing-md: 12px;
+            --spacing-lg: 16px;
+            --transition: 0.2s ease;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', system-ui, sans-serif;
+            background: var(--app-bg);
+            color: var(--text-primary);
+            min-height: 100vh;
+            min-height: 100dvh;
+            padding: var(--spacing-lg);
+            padding-bottom: calc(var(--spacing-lg) + env(safe-area-inset-bottom, 0));
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 480px;
+            display: flex;
+            flex-direction: column;
+            gap: var(--spacing-md);
+        }
+
+        .card {
+            background: var(--card-bg);
+            border-radius: var(--radius-lg);
+            padding: var(--spacing-lg);
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: var(--spacing-sm);
+            padding: var(--spacing-sm) var(--spacing-md);
+            border-radius: 20px;
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: var(--spacing-md);
+        }
+
+        .status-badge.on {
+            background: rgba(48, 209, 88, 0.15);
+            color: var(--status-on);
+        }
+
+        .status-badge.off {
+            background: rgba(255, 69, 58, 0.15);
+            color: var(--status-off);
+        }
+
+        .status-badge.emergency {
+            background: rgba(255, 69, 58, 0.2);
+            color: var(--status-off);
+        }
+
+        .status-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .status-row {
+            display: flex;
+            justify-content: center;
+            padding-bottom: var(--spacing-md);
+            border-bottom: 1px solid var(--divider);
+        }
+
+        .status-row.hidden { display: none; }
+
+        .info-list {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: var(--spacing-md) 0;
+            border-bottom: 1px solid var(--divider);
+        }
+
+        .info-row:last-child { border-bottom: none; }
+
+        .info-label {
+            color: var(--text-secondary);
+            font-size: 15px;
+            font-weight: 400;
+        }
+
+        .info-value {
+            font-size: 15px;
+            font-weight: 500;
+            text-align: right;
+        }
+
+        .schedule-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: var(--spacing-md);
+            border-bottom: 1px solid var(--divider);
+            margin-bottom: var(--spacing-md);
+        }
+
+        .schedule-title {
+            font-size: 16px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: var(--spacing-sm);
+        }
+
+        .schedule-date {
+            color: var(--text-secondary);
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .schedule-grid {
+            display: grid;
+            grid-template-columns: repeat(12, 1fr);
+            gap: 4px;
+        }
+
+        .hour {
+            aspect-ratio: 1;
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            font-weight: 600;
+            transition: transform var(--transition), box-shadow var(--transition);
+        }
+
+        .hour.on { background: var(--power-on); color: #fff; }
+        .hour.off { background: var(--power-off); color: #fff; }
+        .hour.half-first { background: linear-gradient(180deg, var(--power-off) 50%, var(--power-on) 50%); color: #fff; }
+        .hour.half-second { background: linear-gradient(180deg, var(--power-on) 50%, var(--power-off) 50%); color: #fff; }
+
+        .hour.current {
+            transform: scale(1.1);
+            box-shadow: 0 0 0 2px var(--accent), 0 2px 8px rgba(0, 0, 0, 0.3);
+            z-index: 1;
+        }
+
+        .schedule-footer {
+            margin-top: var(--spacing-md);
+            padding-top: var(--spacing-md);
+            border-top: 1px solid var(--divider);
+        }
+
+        .stats {
+            display: flex;
+            justify-content: space-around;
+        }
+
+        .stat {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 20px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .stat-value.on { color: var(--power-on); }
+        .stat-value.off { color: var(--power-off); }
+
+        .stat-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-top: 2px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .empty-state {
+            text-align: center;
+            color: var(--text-secondary);
+            padding: var(--spacing-lg) 0;
+            font-size: 14px;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: calc(80px + env(safe-area-inset-bottom, 0));
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            padding: var(--spacing-md) var(--spacing-lg);
+            border-radius: 12px;
+            font-size: 14px;
+            font-weight: 500;
+            opacity: 0;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            z-index: 1000;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+            color: #fff;
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+
+        .toast.success { background: rgba(48, 209, 88, 0.9); }
+        .toast.error { background: rgba(255, 69, 58, 0.9); }
+
+        .skeleton {
+            background: linear-gradient(90deg, var(--divider) 25%, transparent 50%, var(--divider) 75%);
+            background-size: 200% 100%;
+            animation: shimmer 1.5s infinite;
+            border-radius: var(--radius-sm);
+        }
+
+        @keyframes shimmer {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card" id="statusCard">
+            <div class="status-row" id="statusRow">
+                <div class="status-badge" id="statusBadge">
+                    <span class="status-indicator"></span>
+                    <span id="statusText"></span>
+                </div>
+            </div>
+            <div class="info-list" id="infoList">
+                <div class="info-row hidden" id="startRow">
+                    <span class="info-label" data-i18n="start">Start</span>
+                    <span class="info-value" id="startTime">-</span>
+                </div>
+                <div class="info-row hidden" id="restorationRow">
+                    <span class="info-label" data-i18n="restoration">Restoration</span>
+                    <span class="info-value" id="restorationTime">-</span>
+                </div>
+                <div class="info-row" id="updatedRow">
+                    <span class="info-label" data-i18n="lastUpdated">Last updated</span>
+                    <span class="info-value" id="updatedTime">-</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="card hidden" id="todayCard">
+            <div class="schedule-header">
+                <span class="schedule-title" data-i18n="today">📅 Today</span>
+                <span class="schedule-date" id="todayDate"></span>
+            </div>
+            <div class="schedule-grid" id="todayGrid"></div>
+            <div class="schedule-footer">
+                <div class="stats" id="todayStats"></div>
+            </div>
+        </div>
+
+        <div class="card hidden" id="tomorrowCard">
+            <div class="schedule-header">
+                <span class="schedule-title" data-i18n="tomorrow">📆 Tomorrow</span>
+                <span class="schedule-date" id="tomorrowDate"></span>
+            </div>
+            <div class="schedule-grid" id="tomorrowGrid"></div>
+            <div class="schedule-footer" id="tomorrowFooter">
+                <div class="stats" id="tomorrowStats"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+    (() => {
+        'use strict';
+
+        const APP_VERSION = '2.0.0';
+        const API_ENDPOINT = '/api/v1/schedule';
+
+        const REFRESH_INTERVAL = 10000;
+
+        const $ = id => document.getElementById(id);
+        const $$ = sel => document.querySelectorAll(sel);
+
+        const i18n = {
+            en: {
+                loading: 'Loading...',
+                error: 'Error',
+                failedToLoad: 'Failed to load',
+                emergencyOutage: 'Emergency outage',
+                scheduledOutage: 'Scheduled outage',
+                powerOn: 'Power on',
+                start: 'Start',
+                restoration: 'Restoration',
+                lastUpdated: 'Last updated',
+                today: '📅 Today',
+                tomorrow: '📅 Tomorrow',
+                power: 'Power',
+                outages: 'Outages',
+                noSchedule: 'Schedule not published',
+                updated: '✅ Updated',
+                loadError: '⚠️ Load error'
+            },
+            uk: {
+                loading: 'Завантаження...',
+                error: 'Помилка',
+                failedToLoad: 'Не вдалося завантажити',
+                emergencyOutage: 'Аварійне відключення',
+                scheduledOutage: 'Планове відключення',
+                powerOn: 'Світло є',
+                start: 'Початок',
+                restoration: 'Відновлення',
+                lastUpdated: 'Оновлено ДТЕКом',
+                today: '📅 Сьогодні',
+                tomorrow: '📅 Завтра',
+                power: 'Зі світлом',
+                outages: 'Відключення',
+                noSchedule: 'Графік не опубліковано',
+                updated: '✅ Оновлено',
+                loadError: '⚠️ Помилка'
+            }
+        };
+
+        const state = {
+            tg: window.Telegram?.WebApp,
+            lang: 'en',
+            prevUpdate: null,
+            isFirst: true
+        };
+
+        const t = key => i18n[state.lang]?.[key] ?? i18n.en[key] ?? key;
+
+        const formatDuration = mins => {
+            const h = Math.floor(mins / 60);
+            const m = mins % 60;
+            const suffix = state.lang === 'uk' ? ['г', 'хв'] : ['h', 'm'];
+            return m ? `${h}${suffix[0]} ${m}${suffix[1]}` : `${h}${suffix[0]}`;
+        };
+
+        const parseDate = (str, offset = 0) => {
+            if (!str) return false;
+            const now = new Date();
+            now.setDate(now.getDate() + offset);
+            const [d, m, y] = [now.getDate(), now.getMonth() + 1, now.getFullYear() % 100]
+                .map(n => String(n).padStart(2, '0'));
+            return str === `${d}.${m}.${y}`;
+        };
+
+        const showToast = (msg, type) => {
+            const el = $('toast');
+            el.textContent = msg;
+            el.className = `toast ${type} show`;
+            setTimeout(() => el.classList.remove('show'), 2500);
+        };
+
+        const haptic = type => {
+            try { state.tg?.HapticFeedback?.notificationOccurred(type); } catch {}
+        };
+
+        const updateLabels = () => {
+            $$('[data-i18n]').forEach(el => {
+                const key = el.dataset.i18n;
+                if (key) el.textContent = t(key);
+            });
+        };
+
+        const renderGrid = (slots, gridId, isToday = false) => {
+            const grid = $(gridId);
+            const hour = new Date().getHours();
+            
+            const statusMap = {
+                power_on: 'on',
+                power_off: 'off',
+                power_off_first_30: 'half-first',
+                power_off_second_30: 'half-second'
+            };
+
+            grid.innerHTML = slots.map(s => {
+                const cls = statusMap[s.status] || 'on';
+                const current = isToday && s.hour === hour ? ' current' : '';
+                return `<div class="hour ${cls}${current}">${s.hour}</div>`;
+            }).join('');
+        };
+
+        const renderStats = (slots, statsId) => {
+            let on = 0, off = 0;
+            slots.forEach(s => {
+                if (s.status === 'power_on') on += 60;
+                else if (s.status === 'power_off') off += 60;
+                else { on += 30; off += 30; }
+            });
+
+            $(statsId).innerHTML = `
+                <div class="stat">
+                    <div class="stat-value on">${formatDuration(on)}</div>
+                    <div class="stat-label">${t('power')}</div>
+                </div>
+                <div class="stat">
+                    <div class="stat-value off">${formatDuration(off)}</div>
+                    <div class="stat-label">${t('outages')}</div>
+                </div>
+            `;
+        };
+
+        const renderStatus = (status, isKrem) => {
+            const row = $('statusRow');
+            const badge = $('statusBadge');
+            const text = $('statusText');
+            const startRow = $('startRow');
+            const restRow = $('restorationRow');
+
+            if (isKrem) {
+                row.classList.add('hidden');
+                startRow.classList.add('hidden');
+                restRow.classList.add('hidden');
+                return;
+            }
+
+            row.classList.remove('hidden');
+            const isOff = status.status === 'emergency' || status.status === 'scheduled';
+            const isEmergency = status.status === 'emergency';
+
+            badge.className = `status-badge ${isOff ? (isEmergency ? 'emergency' : 'off') : 'on'}`;
+            text.textContent = isOff 
+                ? (isEmergency ? t('emergencyOutage') : t('scheduledOutage'))
+                : t('powerOn');
+
+            if (isOff) {
+                startRow.classList.remove('hidden');
+                restRow.classList.remove('hidden');
+                $('startTime').textContent = status.start_time || '-';
+                $('restorationTime').textContent = status.restoration_time || '-';
+            } else {
+                startRow.classList.add('hidden');
+                restRow.classList.add('hidden');
+            }
+        };
+
+        const renderSchedule = (data, cardId, gridId, statsId, dateId, offset, isToday = false) => {
+            const card = $(cardId);
+            if (!data?.slots || !parseDate(data.date, offset)) {
+                card.classList.add('hidden');
+                return;
+            }
+
+            card.classList.remove('hidden');
+            $(dateId).textContent = data.date;
+
+            const hasOutages = data.slots.some(s => s.status !== 'power_on');
+            
+            if (!hasOutages && !isToday) {
+                $(gridId).innerHTML = `<div class="empty-state" style="grid-column:1/-1">${t('noSchedule')}</div>`;
+                $(statsId).parentElement.classList.add('hidden');
+            } else {
+                renderGrid(data.slots, gridId, isToday);
+                renderStats(data.slots, statsId);
+                $(statsId).parentElement.classList.remove('hidden');
+            }
+        };
+
+        const fetchData = async () => {
+            try {
+                const res = await fetch(`${API_ENDPOINT}?_v=${APP_VERSION}&_t=${Date.now()}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+
+                state.lang = data.parser_type === 'krem' ? 'uk' : 'en';
+                updateLabels();
+
+                const updated = data.current_outage?.last_updated;
+                const changed = state.prevUpdate && state.prevUpdate !== updated;
+                state.prevUpdate = updated;
+
+                renderStatus(data.current_outage, data.parser_type === 'krem');
+                $('updatedTime').textContent = updated || '-';
+
+                renderSchedule(data.today, 'todayCard', 'todayGrid', 'todayStats', 'todayDate', 0, true);
+                renderSchedule(data.tomorrow, 'tomorrowCard', 'tomorrowGrid', 'tomorrowStats', 'tomorrowDate', 1, false);
+
+                if (!state.isFirst && changed) {
+                    showToast(t('updated'), 'success');
+                    haptic('success');
+                }
+                state.isFirst = false;
+
+            } catch (err) {
+                console.error('Fetch error:', err);
+                showToast(t('loadError'), 'error');
+                haptic('error');
+                if (state.isFirst) {
+                    $('statusText').textContent = t('error');
+                }
+            }
+        };
+
+        const init = () => {
+            if (state.tg) {
+                state.tg.ready();
+                state.tg.expand();
+                state.tg.setHeaderColor?.('secondary_bg_color');
+                state.tg.setBackgroundColor?.('secondary_bg_color');
+            }
+
+            $('statusText').textContent = t('loading');
+            fetchData();
+            setInterval(fetchData, REFRESH_INTERVAL);
+
+            console.log(`DTEK Mini App v${APP_VERSION}`);
+        };
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+        } else {
+            init();
+        }
+    })();
+    </script>
+</body>
+</html>
