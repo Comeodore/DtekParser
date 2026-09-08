@@ -10,7 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.routes.schedule import router as schedule_router
 from app.scheduler import schedule_service
 
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 
 logging.basicConfig(
     level=logging.INFO,

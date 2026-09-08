@@ -290,6 +290,10 @@
                 </div>
             </div>
             <div class="info-list" id="infoList">
+                <div class="info-row hidden" id="reasonRow">
+                    <span class="info-label" data-i18n="reason">Reason</span>
+                    <span class="info-value" id="reasonText">-</span>
+                </div>
                 <div class="info-row hidden" id="startRow">
                     <span class="info-label" data-i18n="start">Start</span>
                     <span class="info-value" id="startTime">-</span>
@@ -303,6 +307,10 @@
                     <span class="info-value" id="updatedTime">-</span>
                 </div>
             </div>
+        </div>
+
+        <div class="card hidden" id="noScheduleCard">
+            <div class="empty-state" data-i18n="noSchedule">Schedule not published</div>
         </div>
 
         <div class="card hidden" id="todayCard">
@@ -334,7 +342,7 @@
     (() => {
         'use strict';
 
-        const APP_VERSION = '2.0.0';
+        const APP_VERSION = '2.1.0';
         const API_ENDPOINT = '/api/v1/schedule';
 
         const REFRESH_INTERVAL = 10000;
@@ -350,6 +358,7 @@
                 emergencyOutage: 'Emergency outage',
                 scheduledOutage: 'Scheduled outage',
                 powerOn: 'Power on',
+                reason: 'Reason',
                 start: 'Start',
                 restoration: 'Restoration',
                 lastUpdated: 'Last updated',
@@ -368,9 +377,10 @@
                 emergencyOutage: 'Аварійне відключення',
                 scheduledOutage: 'Планове відключення',
                 powerOn: 'Світло є',
+                reason: 'Причина',
                 start: 'Початок',
                 restoration: 'Відновлення',
-                lastUpdated: 'Оновлено ДТЕКом',
+                lastUpdated: 'Дані ДТЕК від',
                 today: '📅 Сьогодні',
                 tomorrow: '📅 Завтра',
                 power: 'Зі світлом',
@@ -462,45 +472,44 @@
             `;
         };
 
-        const renderStatus = (status, isKrem) => {
+        const renderStatus = status => {
             const row = $('statusRow');
             const badge = $('statusBadge');
             const text = $('statusText');
+            const reasonRow = $('reasonRow');
             const startRow = $('startRow');
             const restRow = $('restorationRow');
 
-            if (isKrem) {
+            const detail = (el, valueId, value) => {
+                el.classList.toggle('hidden', !value);
+                if (value) $(valueId).textContent = value;
+            };
+
+            if (!status) {
                 row.classList.add('hidden');
-                startRow.classList.add('hidden');
-                restRow.classList.add('hidden');
+                [reasonRow, startRow, restRow].forEach(el => el.classList.add('hidden'));
                 return;
             }
 
             row.classList.remove('hidden');
-            const isOff = status.status === 'emergency' || status.status === 'scheduled';
             const isEmergency = status.status === 'emergency';
+            const isOff = isEmergency || status.status === 'scheduled';
 
             badge.className = `status-badge ${isOff ? (isEmergency ? 'emergency' : 'off') : 'on'}`;
-            text.textContent = isOff 
+            text.textContent = isOff
                 ? (isEmergency ? t('emergencyOutage') : t('scheduledOutage'))
                 : t('powerOn');
 
-            if (isOff) {
-                startRow.classList.remove('hidden');
-                restRow.classList.remove('hidden');
-                $('startTime').textContent = status.start_time || '-';
-                $('restorationTime').textContent = status.restoration_time || '-';
-            } else {
-                startRow.classList.add('hidden');
-                restRow.classList.add('hidden');
-            }
+            detail(reasonRow, 'reasonText', isOff && status.reason);
+            detail(startRow, 'startTime', isOff && status.start_time);
+            detail(restRow, 'restorationTime', isOff && status.restoration_time);
         };
 
         const renderSchedule = (data, cardId, gridId, statsId, dateId, offset, isToday = false) => {
             const card = $(cardId);
             if (!data?.slots || !parseDate(data.date, offset)) {
                 card.classList.add('hidden');
-                return;
+                return false;
             }
 
             card.classList.remove('hidden');
@@ -516,6 +525,8 @@
                 renderStats(data.slots, statsId);
                 $(statsId).parentElement.classList.remove('hidden');
             }
+
+            return true;
         };
 
         const fetchData = async () => {
@@ -531,11 +542,12 @@
                 const changed = state.prevUpdate && state.prevUpdate !== updated;
                 state.prevUpdate = updated;
 
-                renderStatus(data.current_outage, data.parser_type === 'krem');
+                renderStatus(data.current_outage);
                 $('updatedTime').textContent = updated || '-';
 
-                renderSchedule(data.today, 'todayCard', 'todayGrid', 'todayStats', 'todayDate', 0, true);
-                renderSchedule(data.tomorrow, 'tomorrowCard', 'tomorrowGrid', 'tomorrowStats', 'tomorrowDate', 1, false);
+                const hasToday = renderSchedule(data.today, 'todayCard', 'todayGrid', 'todayStats', 'todayDate', 0, true);
+                const hasTomorrow = renderSchedule(data.tomorrow, 'tomorrowCard', 'tomorrowGrid', 'tomorrowStats', 'tomorrowDate', 1, false);
+                $('noScheduleCard').classList.toggle('hidden', hasToday || hasTomorrow);
 
                 if (!state.isFirst && changed) {
                     showToast(t('updated'), 'success');
@@ -548,6 +560,7 @@
                 showToast(t('loadError'), 'error');
                 haptic('error');
                 if (state.isFirst) {
+                    $('statusRow').classList.remove('hidden');
                     $('statusText').textContent = t('error');
                 }
             }
