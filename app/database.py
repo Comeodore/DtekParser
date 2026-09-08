@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -103,20 +103,50 @@ class Database:
 
         try:
             current_json = self._outage_to_json(current_outage)
-            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            now = datetime.now()
 
             async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT today_schedule, tomorrow_schedule FROM dtek_schedule WHERE id = $1",
+                    schedule_id
+                )
+                today = self._parse_json(row['today_schedule']) if row else None
+                tomorrow = self._parse_json(row['tomorrow_schedule']) if row else None
+
+                # DTEK showed no table this round. A stored day is worth keeping only
+                # while its date still holds — otherwise the row would serve a graph
+                # from weeks ago under a freshly bumped updated_at.
+                keep_today = self._is_date_current(today, now, 0)
+                keep_tomorrow = self._is_date_current(tomorrow, now, 1)
+
                 await conn.execute(
                     """
                     UPDATE dtek_schedule
                     SET current_outage = $1,
-                        updated_at = $2
-                    WHERE id = $3
+                        today_schedule = CASE WHEN $2::boolean THEN today_schedule END,
+                        tomorrow_schedule = CASE WHEN $3::boolean THEN tomorrow_schedule END,
+                        updated_at = $4
+                    WHERE id = $5
                     """,
-                    current_json, now, schedule_id
+                    current_json, keep_today, keep_tomorrow,
+                    now.strftime('%Y-%m-%d %H:%M:%S'), schedule_id
                 )
+
+            if today and not keep_today:
+                logger.info(f"🧹 Dropped stale today schedule ({today.get('date')})")
+            if tomorrow and not keep_tomorrow:
+                logger.info(f"🧹 Dropped stale tomorrow schedule ({tomorrow.get('date')})")
         except Exception as e:
             logger.error(f"❌ Failed to save current outage: {e}")
+
+    def _is_date_current(self, schedule: Optional[dict], now: datetime, offset_days: int) -> bool:
+        if not schedule:
+            return False
+        try:
+            parsed = datetime.strptime(schedule.get('date', ''), '%d.%m.%y').date()
+        except (ValueError, TypeError):
+            return False
+        return parsed == (now + timedelta(days=offset_days)).date()
 
     def _outage_to_json(self, outage: Optional[CurrentOutage]) -> Optional[str]:
         if not outage:
