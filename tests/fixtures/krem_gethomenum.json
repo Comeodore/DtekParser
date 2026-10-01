@@ -1,0 +1,36 @@
+{
+ "result": true,
+ "data": {
+  "15": {
+   "sub_type": "",
+   "start_date": "",
+   "end_date": "",
+   "type": "",
+   "sub_type_reason": [
+    "GPV3.1",
+    "GPV2.2"
+   ],
+   "voluntarily": null,
+   "cek": null
+  },
+  "10": {
+   "sub_type": "",
+   "start_date": "",
+   "end_date": "",
+   "type": "",
+   "sub_type_reason": [
+    "GPV3.1",
+    "GPV2.2"
+   ],
+   "voluntarily": null,
+   "cek": null
+  }
+ },
+ "showCurOutageParam": true,
+ "showCurSchedule": true,
+ "showTableSchedule": true,
+ "showTablePlan": true,
+ "showTableFact": true,
+ "showUserGroup": true,
+ "updateTimestamp": "13:01 01.10.2026"
+}

@@ -1,60 +1,50 @@
-"""Drop-in heartbeat client for bots / schedulers — stdlib only, no deps.
+"""Pushes to the home monitoring stack (nginx :8099 -> VictoriaMetrics).
 
-Copy this file into each bot project. Configure via env:
-    HEARTBEAT_URL    e.g. http://192.168.0.185:8099   (LAN address of the monitor)
-    HEARTBEAT_TOKEN  the PUSH_TOKEN from the monitor's .env
-    HEARTBEAT_ID     the service id the monitor expects (must match services.yml)
-
-Two ways to use it:
-
-    from heartbeat import start_heartbeat, beat
-
-    # 1) liveness — proves the process/event-loop is alive (background thread)
-    start_heartbeat(period=45)
-
-    # 2) functional — call after each real unit of work (handled update / parse)
-    beat("parsed 12 rows")
-
-Both are best-effort: network errors are swallowed so the heartbeat can never
-break the bot. A missing beat is exactly the signal we want the monitor to see.
+Beats are functional: a source beats after a successful fetch, the power
+monitor while Home Assistant is streaming, the outbox after a healthy cycle.
+A missing beat is what raises "Heartbeat missing" in Grafana.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
-import threading
 import time
 import urllib.parse
 import urllib.request
 
+logger = logging.getLogger(__name__)
 
-def _push(service_id: str, base: str, token: str, msg: str) -> None:
-    params = {k: v for k, v in {"token": token, "msg": msg}.items() if v}
-    url = f"{base.rstrip('/')}/push/{urllib.parse.quote(service_id)}?{urllib.parse.urlencode(params)}"
+
+def _push(base: str, service_id: str, token: str, msg: str) -> None:
+    params = urllib.parse.urlencode({k: v for k, v in {"token": token, "msg": msg}.items() if v})
+    url = f"{base.rstrip('/')}/push/{urllib.parse.quote(service_id)}" + (f"?{params}" if params else "")
     urllib.request.urlopen(url, timeout=5).read()
 
 
-def beat(msg: str = "", *, service_id: str | None = None,
-         base: str | None = None, token: str | None = None) -> None:
-    """Send a single heartbeat. Silent on failure."""
-    service_id = service_id or os.environ.get("HEARTBEAT_ID")
-    base = base or os.environ.get("HEARTBEAT_URL")
-    token = token or os.environ.get("HEARTBEAT_TOKEN", "")
-    if not service_id or not base:
-        return
-    try:
-        _push(service_id, base, token, msg)
-    except Exception:
-        pass
+class Heartbeat:
+    def __init__(self, service_id: str, min_interval: float = 30.0):
+        self.service_id = service_id
+        self._min_interval = min_interval
+        self._last = 0.0
+        self._base = os.environ.get("HEARTBEAT_URL", "")
+        self._token = os.environ.get("HEARTBEAT_TOKEN", "")
 
+    def pulse(self, msg: str = "") -> None:
+        """Fire-and-forget; never raises, never blocks the loop."""
+        if not self._base:
+            return
+        now = time.monotonic()
+        if now - self._last < self._min_interval:
+            return
+        self._last = now
+        try:
+            asyncio.get_running_loop().run_in_executor(None, self._send, msg)
+        except RuntimeError:
+            pass
 
-def start_heartbeat(period: int = 45, *, service_id: str | None = None,
-                    base: str | None = None, token: str | None = None) -> threading.Thread:
-    """Start a daemon thread that beats every `period` seconds."""
-    def loop():
-        while True:
-            beat("alive", service_id=service_id, base=base, token=token)
-            time.sleep(period)
-
-    t = threading.Thread(target=loop, name="heartbeat", daemon=True)
-    t.start()
-    return t
+    def _send(self, msg: str) -> None:
+        try:
+            _push(self._base, self.service_id, self._token, msg)
+        except Exception as e:
+            logger.debug(f"Heartbeat {self.service_id} failed: {e}")

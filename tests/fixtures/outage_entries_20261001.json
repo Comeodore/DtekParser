@@ -1,0 +1,35 @@
+{
+ "planned": {
+  "sub_type": "Профілактичні роботи для підвищення надійності мережі",
+  "start_date": "10:57 01.10.2026",
+  "end_date": "15:00 01.10.2026",
+  "type": "1",
+  "sub_type_reason": [
+   "GPV43.1"
+  ],
+  "voluntarily": null,
+  "cek": null
+ },
+ "emergency": {
+  "sub_type": "Аварійні ремонтні роботи",
+  "start_date": "11:04 01.10.2026",
+  "end_date": "15:04 01.10.2026",
+  "type": "2",
+  "sub_type_reason": [
+   "GPV41.1"
+  ],
+  "voluntarily": null,
+  "cek": null
+ },
+ "emergency_overnight": {
+  "sub_type": "Аварійні ремонтні роботи",
+  "start_date": "18:06 30.09.2026",
+  "end_date": "14:35 01.10.2026",
+  "type": "2",
+  "sub_type_reason": [
+   "GPV43.1"
+  ],
+  "voluntarily": null,
+  "cek": null
+ }
+}

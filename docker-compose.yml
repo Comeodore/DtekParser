@@ -1,0 +1,18 @@
+services:
+  dtek:
+    build: .
+    image: dtek-service:latest
+    container_name: dtek-service
+    restart: unless-stopped
+    # Host network: Wake-on-LAN broadcasts must reach the LAN, and the source
+    # ports (9999 kem, 9998 krem) stay where the tunnel and probes expect them.
+    network_mode: host
+    # Reaps Chromium's child processes (python would otherwise be PID 1).
+    init: true
+    env_file: .env
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
