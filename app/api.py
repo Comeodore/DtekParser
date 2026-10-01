@@ -134,8 +134,10 @@ def create_app(service: Service) -> FastAPI:
                 "status": state.status.name if state else None,
                 "since": state.since.isoformat() if state else None,
             }
-        ok = all(s["healthy"] for s in sources.values()) and (power is None or power["connected"])
-        body = {"status": "ok" if ok else "degraded", "version": APP_VERSION, "sources": sources, "power": power}
+        problems = service.problems(now)
+        ok = not problems
+        body = {"status": "ok" if ok else "degraded", "version": APP_VERSION, "problems": problems,
+                "sources": sources, "power": power}
         return JSONResponse(body, status_code=200 if ok else 503)
 
     @app.post("/api/v1/wol")

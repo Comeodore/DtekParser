@@ -18,7 +18,8 @@ from app.timeutil import KYIV_TZ, now_kyiv
 
 logger = logging.getLogger(__name__)
 
-STALE_AFTER = timedelta(minutes=5)
+# Three missed cycles: one slow or failed fetch is retried within seconds and is no reason for alarm.
+STALE_AFTER = timedelta(minutes=3)
 
 
 class Site(Protocol):
@@ -35,7 +36,6 @@ class SourceCollector:
         interval: float = 60.0,
         clock: Callable[[], datetime] = now_kyiv,
         on_messages: Optional[Callable[[], None]] = None,
-        on_success: Optional[Callable[[], None]] = None,
     ):
         self.config = config
         self._site = site
@@ -44,7 +44,6 @@ class SourceCollector:
         self._interval = interval
         self._clock = clock
         self._on_messages = on_messages
-        self._on_success = on_success
         self.latest: Optional[Snapshot] = None
         self.last_success: Optional[datetime] = None
         self.failures = 0
@@ -118,8 +117,6 @@ class SourceCollector:
             logger.info(f"[{self.name}] event: {event}")
         if messages and self._on_messages:
             self._on_messages()
-        if self._on_success:
-            self._on_success()
         return True
 
     def _failed(self, stage: str, error: Exception) -> None:

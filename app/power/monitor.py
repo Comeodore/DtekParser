@@ -46,7 +46,6 @@ class PowerMonitor:
         snapshot: Callable[[], Optional[Snapshot]],
         clock: Callable[[], datetime] = now_kyiv,
         on_messages: Optional[Callable[[], None]] = None,
-        on_alive: Optional[Callable[[], None]] = None,
     ):
         self._config = config
         self._store = store
@@ -54,7 +53,6 @@ class PowerMonitor:
         self._snapshot = snapshot
         self._clock = clock
         self._on_messages = on_messages
-        self._on_alive = on_alive
         self._state: Optional[PowerState] = None
         self._battery = "N/A"
         self.connected = False
@@ -85,13 +83,6 @@ class PowerMonitor:
                 delay = self.RECONNECT_MIN_S
             await asyncio.sleep(delay)
             delay = min(delay * 2, self.RECONNECT_MAX_S)
-
-    async def watchdog(self) -> None:
-        """Heartbeat while subscribed to Home Assistant."""
-        while True:
-            await asyncio.sleep(15)
-            if self.connected and self._on_alive:
-                self._on_alive()
 
     async def _session(self) -> None:
         timeout = aiohttp.ClientTimeout(total=None, connect=20, sock_read=None)

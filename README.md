@@ -50,10 +50,11 @@ The address form is never filled in. A house fed by two lines (`krem`, вул.
 - The power monitor uses HA `subscribe_entities`. After a reconnect it gets
   the current state with its `last_changed`, so an outage that began during
   the gap is still reported, with its real start time.
-- Every loop is supervised and restarted on a crash. Heartbeats are
-  functional: a source beats only after a successful fetch. The ids
-  `dtek-parser-kem`, `dtek-parser-krem`, `lightbot` and `schedulebot` are
-  kept, so the existing Grafana alerts keep working.
+- Every loop is supervised and restarted on a crash.
+- One heartbeat, `dtek-service`, is sent every 30 s, but only while every
+  check passes: both addresses fetched within 3 minutes, Home Assistant
+  connected, the delivery loop cycling. `GET /api/v1/health` lists which
+  check fails, and the log says so the moment the heartbeat pauses.
 
 ## Run
 

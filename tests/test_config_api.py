@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -86,3 +88,19 @@ def test_mini_app_page(client):
     http, _ = client
     response = http.get("/")
     assert response.status_code == 200 and "DTEK" in response.text
+
+
+def test_problems_name_each_failing_check(client):
+    _, service = client
+    now = kyiv(2026, 10, 1, 12, 1)
+    service.collectors["krem"].last_error = "fetch: TimeoutError: page did not load"
+    problems = service.problems(now)
+    assert problems == [
+        "krem: no successful DTEK fetch since start: fetch: TimeoutError: page did not load",
+        "power: Home Assistant is not connected",
+        "outbox: message delivery loop is not cycling",
+    ]
+    service.collectors["krem"].last_success = now
+    service.power.connected = True
+    service.outbox.last_cycle = time.monotonic()
+    assert service.problems(now) == []

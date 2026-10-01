@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Callable, Mapping, Optional, Protocol
 
@@ -85,14 +86,14 @@ class OutboxSender:
     KEEP_FINISHED = timedelta(days=30)
     PURGE_EVERY = timedelta(hours=1)
 
-    def __init__(self, store: Store, gateway: Gateway, clock: Callable[[], datetime] = now_kyiv,
-                 on_cycle: Optional[Callable[[], None]] = None):
+    def __init__(self, store: Store, gateway: Gateway, clock: Callable[[], datetime] = now_kyiv):
         self._store = store
         self._gateway = gateway
         self._clock = clock
-        self._on_cycle = on_cycle
         self._wake = asyncio.Event()
         self._last_purge: Optional[datetime] = None
+        # time.monotonic() of the last cycle that reached the database without errors.
+        self.last_cycle: Optional[float] = None
 
     def wake(self) -> None:
         self._wake.set()
@@ -102,8 +103,7 @@ class OutboxSender:
             try:
                 await self.flush()
                 await self._purge_if_due()
-                if self._on_cycle:
-                    self._on_cycle()
+                self.last_cycle = time.monotonic()
             except Exception as e:
                 logger.error(f"Outbox cycle failed: {e}")
             try:
