@@ -64,6 +64,7 @@ class Settings:
     wol_broadcast: str
     fetch_interval: float
     dry_run: bool
+    state_dir: str = "data"     # per-source browser cookies, kept across restarts
 
     def source(self, name: str) -> SourceConfig:
         return next(s for s in self.sources if s.name == name)
@@ -177,4 +178,5 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         wol_broadcast=_get(env, "WOL_BROADCAST", "255.255.255.255"),
         fetch_interval=float(_get(env, "FETCH_INTERVAL", "60")),
         dry_run=_bool(env, "NOTIFY_DRY_RUN", False),
+        state_dir=_get(env, "STATE_DIR", "data"),
     )

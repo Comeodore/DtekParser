@@ -10,6 +10,9 @@ services:
     # Reaps Chromium's child processes (python would otherwise be PID 1).
     init: true
     env_file: .env
+    volumes:
+      # Browser cookies per source (see tools/solve_captcha.sh).
+      - ./data:/app/data
     stop_grace_period: 30s
     logging:
       driver: json-file

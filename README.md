@@ -31,6 +31,13 @@ site. Data comes from the same sources the page itself uses:
 The address form is never filled in. A house fed by two lines (`krem`, вул.
 Садова 10) gets both lines.
 
+Cookies of the last successful load are kept in `data/state-<source>.json`
+and seed every new browser context, so resets and restarts keep the
+Incapsula session. If Incapsula still escalates to an hCaptcha (the log says
+"Incapsula shows an hCaptcha"), pass it by hand over VNC with
+`tools/solve_captcha.sh <source>` on the server; see the script for the
+tunnel. The service picks the saved cookies up on its next attempt.
+
 ## Reliability rules
 
 - Change detection (`app/engine/detector.py`) matches days by date, so

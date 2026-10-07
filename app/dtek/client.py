@@ -9,12 +9,19 @@ getHomeNum request the page makes when an address is typed is sent from there
 with fetch(), carrying the same headers jQuery and yii.js would add.
 
 Recovery ladder on consecutive failures: reload the page, then a fresh browser
-context (new cookies), then a relaunched browser.
+context, then a relaunched browser.
+
+Cookies of the last successful load are saved per source and seed every new
+context, so a reset or restart keeps the Incapsula session instead of showing
+up as a brand-new visitor (a burst of those is what earns an hCaptcha). An
+hCaptcha cannot be passed headless: tools/solve_captcha.sh opens the page over
+VNC, and the cookies it saves are picked up by the next context.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -109,7 +116,7 @@ class BrowserPool:
         self._launched_at = 0.0
         self._lock = asyncio.Lock()
 
-    async def new_context(self) -> BrowserContext:
+    async def new_context(self, storage_state: Optional[str] = None) -> BrowserContext:
         async with self._lock:
             too_old = time.monotonic() - self._launched_at > self.MAX_AGE_S
             if self._browser is None or not self._browser.is_connected() or too_old:
@@ -117,6 +124,7 @@ class BrowserPool:
             assert self._browser is not None
             context = await self._browser.new_context(
                 user_agent=USER_AGENT, locale="uk-UA", timezone_id="Europe/Kyiv", viewport=VIEWPORT,
+                storage_state=storage_state,
             )
             await context.route("**/*", _filter_requests)
             return context
@@ -162,8 +170,10 @@ class DtekSite:
     CONTEXT_RESET_AFTER = 3
     BROWSER_RESET_AFTER = 6
 
-    def __init__(self, pool: BrowserPool, name: str, url: str, street: str, settlement: Optional[str]):
+    def __init__(self, pool: BrowserPool, name: str, url: str, street: str, settlement: Optional[str],
+                 state_path: Optional[str] = None):
         self._pool = pool
+        self._state_path = state_path
         self._name = name
         self._url = url
         self._street = street
@@ -228,7 +238,7 @@ class DtekSite:
     async def _load(self) -> None:
         await self._close_page()
         if self._context is None:
-            self._context = await self._pool.new_context()
+            self._context = await self._new_context()
             self._context_created = time.monotonic()
         page = await self._context.new_page()
         try:
@@ -250,6 +260,27 @@ class DtekSite:
         self._csrf = info["csrfToken"]
         self._loaded_at = time.monotonic()
         logger.info(f"[{self._name}] page loaded, schedule data from {self._fact.get('update')}")
+        await self._save_state()
+
+    async def _new_context(self) -> BrowserContext:
+        """A context seeded with the cookies of the last successful load, if there are any."""
+        if self._state_path and os.path.exists(self._state_path):
+            try:
+                return await self._pool.new_context(self._state_path)
+            except Exception as e:
+                logger.warning(f"[{self._name}] saved cookies unusable, starting clean: {e}")
+        return await self._pool.new_context()
+
+    async def _save_state(self) -> None:
+        if not self._state_path or self._context is None:
+            return
+        tmp = self._state_path + ".tmp"
+        try:
+            os.makedirs(os.path.dirname(self._state_path) or ".", exist_ok=True)
+            await self._context.storage_state(path=tmp)
+            os.replace(tmp, self._state_path)
+        except Exception as e:
+            logger.warning(f"[{self._name}] could not save cookies to {self._state_path}: {e}")
 
     async def _park(self, page: Page) -> None:
         """Move the tab to a static document of the same origin; cookies stay, scripts stop.
@@ -281,6 +312,9 @@ class DtekSite:
                 if ("context was destroyed" in text or "navigat" in text) and time.monotonic() < deadline:
                     await asyncio.sleep(0.5)
                     continue
+                if any("hcaptcha.com" in frame.url for frame in page.frames):
+                    raise FetchError("Incapsula shows an hCaptcha; solve it with tools/solve_captcha.sh "
+                                     f"{self._name}") from e
                 raise
 
     async def _on_failure(self, error: Exception) -> None:

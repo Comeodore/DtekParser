@@ -54,7 +54,8 @@ class Service:
         self.sites: dict[str, DtekSite] = {}
         self.collectors: dict[str, SourceCollector] = {}
         for cfg in settings.sources:
-            site = DtekSite(self.pool, cfg.name, cfg.url, cfg.street, cfg.settlement)
+            site = DtekSite(self.pool, cfg.name, cfg.url, cfg.street, cfg.settlement,
+                            state_path=os.path.join(settings.state_dir, f"state-{cfg.name}.json"))
             self.sites[cfg.name] = site
             self.collectors[cfg.name] = SourceCollector(
                 cfg, site, self.store, self.router, settings.fetch_interval, on_messages=self.outbox.wake,
