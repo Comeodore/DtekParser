@@ -409,6 +409,29 @@
         .inverter.stale .inverter-time { color: #ff9f0a; }
 
         .hidden { display: none !important; }
+
+        /* Telegram Desktop opens the mini app about 600px tall: tighten so the status card and
+           today's schedule fit without scrolling. Phones keep the roomier layout. */
+        @media (max-height: 720px) {
+            body { padding: var(--spacing-md); }
+            .container { gap: var(--spacing-sm); }
+            .card { padding: var(--spacing-md); }
+            .status-badge { padding: 6px var(--spacing-md); margin-bottom: 0; }
+            .status-row { padding-bottom: var(--spacing-sm); }
+            .info-row { padding: 7px 0; }
+            .inverter { padding: var(--spacing-sm) 8px 8px; }
+            #hubSun { display: flex; align-items: center; gap: 6px; padding: 4px 10px; }
+            #hubSun svg { margin: 0; }
+            .hub-vline { height: 12px; }
+            .hub-row .hub-node { padding: 5px 6px; }
+            .hub-home { width: 78px; height: 78px; }
+            .hub-home svg { width: 18px; height: 18px; }
+            .hub-home .hub-value { font-size: 15px; }
+            .inverter-footer { margin-top: 6px; padding-top: 6px; font-size: 12px; }
+            .schedule-header { padding-bottom: var(--spacing-sm); margin-bottom: var(--spacing-sm); }
+            .schedule-footer { margin-top: var(--spacing-sm); padding-top: var(--spacing-sm); }
+            .stat-value { font-size: 17px; }
+        }
     </style>
 </head>
 <body>
@@ -465,7 +488,7 @@
                         <div class="hub-node" id="hubBattery">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="16" height="10" rx="2"/><path d="M21 10v4"/></svg>
                             <div class="hub-value"></div>
-                            <div class="hub-flow"></div>
+                            <div class="hub-flow" id="hubBatteryFlow"></div>
                         </div>
                     </div>
                 </div>
@@ -759,7 +782,7 @@
             const batteryCls = fromBattery ? 'off' : charging ? 'on' : '';
             node('hubBattery', inv.soc == null ? '–' : `${Math.round(inv.soc)}%`, '');
             $('hubBattery').querySelector('svg').setAttribute('class', batteryCls);
-            const batteryFlow = $('hubBattery').querySelector('.hub-flow');
+            const batteryFlow = $('hubBatteryFlow');
             batteryFlow.textContent = batteryCls ? `${flow > 0 ? '+' : '−'}${formatPower(flow)}` : t('battery');
             batteryFlow.className = batteryCls ? `hub-flow ${batteryCls}` : 'hub-label';
             $('hubBatteryLink').className = fromBattery ? 'hub-link to-home off' : charging ? 'hub-link to-side on' : 'hub-link';
