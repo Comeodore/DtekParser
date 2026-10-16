@@ -82,28 +82,38 @@ def deye_config():
 async def test_monitor_keeps_last_reading_and_backs_off():
     monitor = InverterMonitor(deye_config(), clock=lambda: kyiv(2026, 10, 16, 17, 23))
     reading = parse_device_latest(device(), 100)
-    assert await monitor.poll(FakeReader(reading)) == 45
+    assert await monitor.poll(FakeReader(reading)) == 55
     waits = [await monitor.poll(FakeReader(DeyeError("rate limited"))) for _ in range(3)]
     assert waits == [120, 240, 480]
     assert monitor.latest is reading and monitor.failures == 3 and "rate limited" in monitor.last_error
-    assert await monitor.poll(FakeReader(reading)) == 45 and monitor.failures == 0
+    assert await monitor.poll(FakeReader(reading)) == 55 and monitor.failures == 0
 
 
 async def test_polls_follow_the_loggers_rhythm():
     now = [kyiv(2026, 10, 16, 17, 23, 0)]
     monitor = InverterMonitor(deye_config(), clock=lambda: now[0])
     first = parse_device_latest(device(), 100)                      # taken 17:22:03
-    # The next one should reach the cloud 72 + 30 s after that, at 17:23:45.
-    assert await monitor.poll(FakeReader(first)) == 45
-    now[0] = kyiv(2026, 10, 16, 17, 23, 45)
-    assert await monitor.poll(FakeReader(first)) == 15              # not there yet: look again soon
+    # The next one should reach the cloud 72 + 40 s after that, at 17:23:55.
+    assert await monitor.poll(FakeReader(first)) == 55
+    now[0] = kyiv(2026, 10, 16, 17, 23, 55)
+    assert await monitor.poll(FakeReader(first)) == 15              # not there yet: one more look
+    now[0] = kyiv(2026, 10, 16, 17, 24, 10)
+    assert await monitor.poll(FakeReader(first)) == 57              # still not: next upload slot
     second = replace(first, at=kyiv(2026, 10, 16, 17, 23, 15))
-    now[0] = kyiv(2026, 10, 16, 17, 23, 50)
-    assert await monitor.poll(FakeReader(second)) == 67             # next due 17:24:57
-    assert (monitor.cadence, monitor.last_lag_s, monitor.readings, monitor.calls) == (72, 35, 2, 3)
-    now[0] = kyiv(2026, 10, 16, 17, 26, 20)
-    # A whole upload late: the logger is likely offline, back to the plain interval.
-    assert await monitor.poll(FakeReader(second)) == 60
+    now[0] = kyiv(2026, 10, 16, 17, 24, 20)
+    assert await monitor.poll(FakeReader(second)) == 47             # next due 17:25:07
+    assert (monitor.cadence, monitor.last_lag_s, monitor.readings, monitor.calls) == (72, 65, 2, 4)
+
+
+async def test_a_silent_logger_costs_one_poll_per_upload_slot():
+    now = [kyiv(2026, 10, 16, 17, 25, 7)]
+    monitor = InverterMonitor(deye_config(), clock=lambda: now[0])
+    monitor.latest = replace(parse_device_latest(device(), 100), at=kyiv(2026, 10, 16, 17, 23, 15))
+    assert await monitor.poll(FakeReader(monitor.latest)) == 15
+    for minute in range(26, 60):
+        now[0] = kyiv(2026, 10, 16, 17, minute, 7)
+        wait = await monitor.poll(FakeReader(monitor.latest))
+        assert monitor.MIN_WAIT_S <= wait <= monitor.cadence
 
 
 def test_schedule_survives_skipped_uploads_and_skewed_clocks():
@@ -112,7 +122,7 @@ def test_schedule_survives_skipped_uploads_and_skewed_clocks():
     assert monitor.cadence == 73
     monitor.latest = parse_device_latest(device(), 100)
     ahead = monitor.latest.at - timedelta(hours=1)                  # logger clock an hour fast
-    assert monitor.next_wait(ahead) == 73 + 30
+    assert monitor.next_wait(ahead) == 73 + 40
 
 
 def test_deye_settings():

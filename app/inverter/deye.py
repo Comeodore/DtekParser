@@ -2,11 +2,11 @@
 
 The cloud only has what the inverter's Wi-Fi logger uploads (the krem one:
 every ~72 s), and Deye has no push, so polls are timed to that rhythm: the
-next one goes out when the next reading should have reached the cloud, and
-repeats briefly while it is late. That shows a reading about as soon as Deye
-has it, at roughly one or two calls per reading, well within the monthly
-quota. device/latest is used rather than station/latest, which Deye
-documents as refreshed at most every 5 minutes.
+next one goes out when the next reading should have reached the cloud, with
+one retry if it is late, then on to the following upload. That is ~1.2
+calls per reading (~43k a month, as plain 60 s polling), leaving the 100k
+quota room for other stations. device/latest is used rather than
+station/latest, which Deye documents as refreshed at most every 5 minutes.
 """
 from __future__ import annotations
 
@@ -174,9 +174,10 @@ class InverterMonitor:
     # Upload rhythm until readings show the real one (the krem logger: 72 s, measured 16.10).
     CADENCE_S = 72.0
     # Deye Cloud has a reading 12-54 s after the logger took it (16.10); aim past most of that.
-    INGEST_S = 30.0
-    # How often to look again while the expected reading is late.
+    INGEST_S = 40.0
+    # One more look this long after a miss; past that, wait for the next upload.
     RETRY_S = 15.0
+    MAX_RETRIES = 1
     MIN_WAIT_S = 5.0
 
     def __init__(self, config: DeyeConfig, clock: Callable[[], datetime] = now_kyiv):
@@ -188,6 +189,7 @@ class InverterMonitor:
         self.last_error = ""
         self.failures = 0
         self._gaps: deque[float] = deque(maxlen=5)
+        self._misses = 0    # polls in a row that found no newer reading
         # For /health: how fresh readings are when seen, and what that costs in calls.
         self.calls = 0
         self.readings = 0
@@ -199,10 +201,10 @@ class InverterMonitor:
         return statistics.median(self._gaps) if self._gaps else self.CADENCE_S
 
     def next_wait(self, now: datetime) -> float:
-        """Until the next reading should be in the cloud; short retries while it is late.
+        """Until the next reading should be in the cloud; one short retry when it is late.
 
-        Once it is a whole cadence late the logger is probably offline, and
-        polling falls back to DEYE_INTERVAL rather than retrying all night.
+        After that, polls stay on the upload slots (one per cadence), so a
+        skipped upload or an offline logger costs no more than normal polling.
         """
         if self.latest is None:
             return self.config.interval
@@ -211,9 +213,9 @@ class InverterMonitor:
         if until_due > 0:
             # Capped, so a logger clock running ahead cannot park the poller.
             return max(self.MIN_WAIT_S, min(until_due, self.cadence + self.INGEST_S))
-        if -until_due < self.cadence:
+        if self._misses <= self.MAX_RETRIES:
             return self.RETRY_S
-        return self.config.interval
+        return max(self.MIN_WAIT_S, self.cadence - (-until_due % self.cadence))
 
     async def run(self) -> None:
         timeout = aiohttp.ClientTimeout(total=30)
@@ -248,6 +250,9 @@ class InverterMonitor:
         if self.latest is None or reading.at > self.latest.at:
             self.readings += 1
             self.last_lag_s = round((now - reading.at).total_seconds())
+            self._misses = 0
+        else:
+            self._misses += 1
         if self.latest is None or reading.at >= self.latest.at:
             self.latest = reading
         self.last_success = now
