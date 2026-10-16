@@ -154,17 +154,32 @@ class DeyeCloud:
             logger.info(f"Deye station {self._config.station_id}: inverter {self._device_sn}")
         return self._device_sn
 
-    async def latest(self) -> InverterReading:
+    async def latest(self) -> Fetch:
+        """The main inverter plus DEYE_BATTERIES, in one call: Deye's quota counts calls, not devices."""
         sn = await self._inverter()
-        data = await self._call("device/latest", {"deviceList": [sn]})
-        items = data.get("deviceDataList") or []
-        if not items:
+        others = [other for _, other in self._config.batteries]
+        data = await self._call("device/latest", {"deviceList": [sn, *others]})
+        readings = {}
+        for item in data.get("deviceDataList") or []:
+            try:
+                readings[item.get("deviceSn")] = parse_device_latest(item, self._config.min_grid_voltage)
+            except DeyeError as e:
+                # A battery inverter without data must not cost the main reading.
+                logger.debug(f"Deye: skipping {item.get('deviceSn')}: {e}")
+        main = readings.pop(sn, None)
+        if main is None:
             raise DeyeError(f"device/latest returned nothing for {sn}")
-        return parse_device_latest(items[0], self._config.min_grid_voltage)
+        return Fetch(main, readings)
+
+
+@dataclass(frozen=True)
+class Fetch:
+    main: InverterReading
+    others: dict[str, InverterReading]     # by device SN
 
 
 class Reader(Protocol):
-    async def latest(self) -> InverterReading: ...
+    async def latest(self) -> Fetch: ...
 
 
 class InverterMonitor:
@@ -185,6 +200,7 @@ class InverterMonitor:
         self.source = config.source
         self._clock = clock
         self.latest: Optional[InverterReading] = None
+        self.batteries: dict[str, InverterReading] = {}     # by DEYE_BATTERIES name
         self.last_success: Optional[datetime] = None
         self.last_error = ""
         self.failures = 0
@@ -228,7 +244,7 @@ class InverterMonitor:
         """One fetch; returns how long to wait before the next."""
         self.calls += 1
         try:
-            reading = await reader.latest()
+            fetch = await reader.latest()
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -237,6 +253,11 @@ class InverterMonitor:
             if self.failures == 1 or self.failures % 10 == 0:
                 logger.warning(f"Deye fetch failed ({self.failures} in a row): {self.last_error}")
             return min(self.config.interval * 2 ** min(self.failures, 4), self.MAX_BACKOFF_S)
+        for name, sn in self.config.batteries:
+            other = fetch.others.get(sn)
+            if other is not None and (name not in self.batteries or other.at >= self.batteries[name].at):
+                self.batteries[name] = other
+        reading = fetch.main
         if self.latest is not None and reading.at > self.latest.at:
             gap = (reading.at - self.latest.at).total_seconds()
             if 20 <= gap <= 900:
@@ -262,3 +283,17 @@ class InverterMonitor:
 
     def payload(self, now: datetime) -> Optional[dict]:
         return self.latest.to_dict(now, self.STALE_S) if self.latest else None
+
+    def batteries_payload(self, now: datetime) -> list[dict]:
+        """DEYE_BATTERIES in their configured order, for the batteries row of their source's mini app."""
+        rows = []
+        for name, _ in self.config.batteries:
+            reading = self.batteries.get(name)
+            if reading is not None:
+                rows.append({
+                    "name": name,
+                    "soc": reading.soc,
+                    "battery_w": reading.battery_w,
+                    "stale": (now - reading.at).total_seconds() > self.STALE_S,
+                })
+        return rows

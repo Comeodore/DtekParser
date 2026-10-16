@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.api import create_app
 from app.config import ConfigError, load_settings
-from app.inverter.deye import DeyeError, InverterMonitor, parse_device_latest
+from app.inverter.deye import DeyeError, Fetch, InverterMonitor, InverterReading, parse_device_latest
 from app.service import Service
 from app.storage.memory import MemoryStore
 from tests.conftest import BASE_ENV, fixture, kyiv
@@ -72,7 +72,7 @@ class FakeReader:
         result = self.results.pop(0)
         if isinstance(result, Exception):
             raise result
-        return result
+        return Fetch(result, {}) if isinstance(result, InverterReading) else result
 
 
 def deye_config():
@@ -125,11 +125,33 @@ def test_schedule_survives_skipped_uploads_and_skewed_clocks():
     assert monitor.next_wait(ahead) == 73 + 40
 
 
+BATTERIES_ENV = {"DEYE_BATTERIES": "Elevator:2407244424, water:2407244735", "DEYE_BATTERIES_SOURCE": "kem"}
+
+
+async def test_building_batteries_ride_on_the_same_fetch():
+    monitor = InverterMonitor(load_settings({**BASE_ENV, **DEYE_ENV, **BATTERIES_ENV}).deye,
+                              clock=lambda: kyiv(2026, 10, 16, 18, 10))
+    main = parse_device_latest(device(), 100)
+    elevator = replace(main, at=kyiv(2026, 10, 16, 18, 5, 15), soc=90, battery_w=4)
+    water = replace(main, at=kyiv(2026, 10, 16, 17, 40), soc=24, battery_w=-1100)
+    await monitor.poll(FakeReader(Fetch(main, {"2407244424": elevator, "2407244735": water, "999": main})))
+    rows = monitor.batteries_payload(kyiv(2026, 10, 16, 18, 10))
+    assert [(r["name"], r["soc"], r["battery_w"], r["stale"]) for r in rows] == [
+        ("elevator", 90, 4, False), ("water", 24, -1100, True)]
+    # A reading missing from the next answer keeps the last one.
+    await monitor.poll(FakeReader(Fetch(main, {"2407244735": replace(water, at=kyiv(2026, 10, 16, 18, 9))})))
+    assert [r["stale"] for r in monitor.batteries_payload(kyiv(2026, 10, 16, 18, 10))] == [False, False]
+
+
 def test_deye_settings():
     deye = load_settings({**BASE_ENV, **DEYE_ENV}).deye
     assert (deye.source, deye.station_id, deye.device_sn, deye.interval) == ("krem", 61918417, None, 60)
     assert deye.password_sha256 == "a" * 64
     assert deye.base_url == "https://eu1-developer.deyecloud.com"
+    assert (deye.batteries, deye.batteries_source) == ((), None)
+    with_batteries = load_settings({**BASE_ENV, **DEYE_ENV, **BATTERIES_ENV}).deye
+    assert with_batteries.batteries == (("elevator", "2407244424"), ("water", "2407244735"))
+    assert with_batteries.batteries_source == "kem"
     assert load_settings(BASE_ENV).deye is None
 
 
@@ -137,6 +159,9 @@ def test_deye_settings():
     ({"DEYE_PASSWORD_SHA256": "plain password"}, "sha256"),
     ({"DEYE_SOURCE": "nope"}, "not in SOURCES"),
     ({"DEYE_STATION_ID": ""}, "DEYE_STATION_ID"),
+    ({"DEYE_BATTERIES": "elevator"}, "name:serial"),
+    ({"DEYE_BATTERIES": "a:1", "DEYE_BATTERIES_SOURCE": "nope"}, "not in SOURCES"),
+    ({"DEYE_BATTERIES": ",".join(f"b{i}:{i}" for i in range(10))}, "at most 9"),
 ])
 def test_bad_deye_settings(change, message):
     with pytest.raises(ConfigError, match=message):
@@ -144,12 +169,17 @@ def test_bad_deye_settings(change, message):
 
 
 def test_only_the_inverters_source_gets_it(monkeypatch):
-    service = Service(load_settings({**BASE_ENV, **DEYE_ENV}), store=MemoryStore(), gateway=object())
+    service = Service(load_settings({**BASE_ENV, **DEYE_ENV, **BATTERIES_ENV}), store=MemoryStore(), gateway=object())
     service.inverter.latest = parse_device_latest(device(), 100)
+    service.inverter.batteries["water"] = replace(service.inverter.latest, soc=99, battery_w=82)
+    service.power.battery_soc, service.power.battery_w, service.power.connected = 86, -2767, True
     monkeypatch.setattr("app.api.now_kyiv", lambda: kyiv(2026, 10, 16, 17, 25))
     http = TestClient(create_app(service))
-    inverter = http.get("/api/v1/schedule?source=krem").json()["inverter"]
-    assert inverter["grid_w"] == 2861 and inverter["battery_w"] == 2613 and inverter["time"] == "17:22"
-    assert http.get("/api/v1/schedule?source=kem").json()["inverter"] is None
+    krem = http.get("/api/v1/schedule?source=krem").json()
+    assert krem["inverter"]["grid_w"] == 2861 and krem["inverter"]["battery_w"] == 2613
+    assert krem["inverter"]["time"] == "17:22" and krem["batteries"] == []
+    kem = http.get("/api/v1/schedule?source=kem").json()
+    assert kem["inverter"] is None
+    assert [(b["name"], b["soc"], b["battery_w"]) for b in kem["batteries"]] == [("home", 86, -2767), ("water", 99, 82)]
     health = http.get("/api/v1/health").json()["inverter"]
     assert health["source"] == "krem" and health["cadence_s"] == 72 and health["calls_per_reading"] is None

@@ -360,6 +360,13 @@
             color: var(--text-secondary);
         }
 
+        .batteries-stats { display: grid; gap: var(--spacing-xs); text-align: center; }
+        .battery { display: flex; flex-direction: column; justify-content: center; }
+        .battery + .battery { border-left: 1px solid var(--divider); }
+        .battery.stale { opacity: 0.5; }
+        .battery-flow { font-size: 12px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+        .battery-flow:empty { display: none; }
+
         .inverter-time { color: var(--text-primary); font-weight: 500; }
         .inverter.stale .inverter-stats { opacity: 0.5; }
         .inverter.stale .inverter-time { color: #ff9f0a; }
@@ -393,6 +400,9 @@
                     <span class="info-label" data-i18n="lastUpdated"></span>
                     <span class="info-value" id="updatedTime">-</span>
                 </div>
+            </div>
+            <div class="inverter hidden" id="batteries">
+                <div class="batteries-stats" id="batteriesStats"></div>
             </div>
             <div class="inverter hidden" id="inverter">
                 <div class="inverter-stats">
@@ -479,7 +489,10 @@
                 solar: 'Solar',
                 inverter: 'Deye inverter data as of',
                 watt: 'W',
-                kilowatt: 'kW'
+                kilowatt: 'kW',
+                home: 'Home',
+                elevator: 'Elevator',
+                water: 'Water'
             },
             uk: {
                 loading: 'Завантаження...',
@@ -518,7 +531,10 @@
                 solar: 'Сонце',
                 inverter: 'Дані інвертора Deye від',
                 watt: 'Вт',
-                kilowatt: 'кВт'
+                kilowatt: 'кВт',
+                home: 'Дім',
+                elevator: 'Ліфт',
+                water: 'Вода'
             }
         };
 
@@ -699,6 +715,33 @@
             $('inverterTime').textContent = inv.time;
         };
 
+        const BATTERY_ICONS = {
+            home: '<path d="M4 11 12 4l8 7"/><path d="M6 10v10h12V10"/>',
+            elevator: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="m9 9 3-3 3 3M9 15l3 3 3-3"/>',
+            water: '<path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11z"/>'
+        };
+        const BATTERY_ICON = '<rect x="3" y="7" width="16" height="10" rx="2"/><path d="M21 10v4"/>';
+
+        // Batteries shown with this source: the home one from HA, the building's from Deye.
+        const renderBatteries = rows => {
+            $('batteries').classList.toggle('hidden', !rows.length);
+            const stats = $('batteriesStats');
+            stats.style.gridTemplateColumns = `repeat(${rows.length || 1}, minmax(0, 1fr))`;
+            stats.replaceChildren(...rows.map(row => {
+                const value = el('div', 'inverter-value');
+                value.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+                    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+                    (BATTERY_ICONS[row.name] || BATTERY_ICON) + '</svg>';
+                value.appendChild(el('span', '', row.soc == null ? '–' : `${Math.round(row.soc)}%`));
+                const w = row.battery_w || 0;
+                const flow = Math.abs(w) < IDLE_W ? ''
+                    : `${w > 0 ? '+' : '−'}${(Math.abs(w) / 1000).toFixed(1)} ${t('kilowatt')}`;
+                const column = el('div', row.stale ? 'battery stale' : 'battery');
+                column.append(value, el('div', `battery-flow ${w > 0 ? 'on' : 'off'}`, flow), el('div', 'inverter-label', t(row.name)));
+                return column;
+            }));
+        };
+
         const renderNotices = data => {
             const notes = [];
             if (data.schedules_suspended) notes.push(t('suspended'));
@@ -734,6 +777,7 @@
                 renderStatus(currentStatus(data), data.outage_updated);
                 renderNotices(data);
                 renderInverter(data.inverter);
+                renderBatteries(data.batteries || []);
 
                 const days = $('days');
                 days.replaceChildren(...(data.days || []).map(renderDay));

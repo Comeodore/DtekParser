@@ -17,7 +17,7 @@ import aiohttp
 from app.config import PowerConfig
 from app.dtek.models import Snapshot
 from app.notify.router import Router
-from app.power.state import PowerState, PowerStatus, next_state, parse_battery, parse_voltage
+from app.power.state import PowerState, PowerStatus, next_state, parse_battery, parse_number, parse_voltage
 from app.storage.store import Store
 from app.timeutil import KYIV_TZ, now_kyiv
 
@@ -55,12 +55,24 @@ class PowerMonitor:
         self._on_messages = on_messages
         self._state: Optional[PowerState] = None
         self._battery = "N/A"
+        # For the mini app's batteries row; HA pushes every change, so these are live.
+        self.battery_soc: Optional[float] = None
+        self.battery_w: Optional[float] = None
         self.connected = False
         self._warned_unavailable = False
 
     @property
     def state(self) -> Optional[PowerState]:
         return self._state
+
+    @property
+    def source(self) -> str:
+        return self._config.source
+
+    def battery_payload(self) -> Optional[dict]:
+        if self.battery_soc is None:
+            return None
+        return {"name": "home", "soc": self.battery_soc, "battery_w": self.battery_w, "stale": not self.connected}
 
     async def restore(self) -> None:
         async with self._store.transaction() as tx:
@@ -94,7 +106,8 @@ class PowerMonitor:
                 await ws.send_json({
                     "id": SUBSCRIPTION_ID,
                     "type": "subscribe_entities",
-                    "entity_ids": [self._config.voltage_entity, self._config.battery_entity],
+                    "entity_ids": [self._config.voltage_entity, self._config.battery_entity,
+                                   self._config.battery_power_entity],
                 })
                 self.connected = True
                 logger.info("Connected to Home Assistant, subscribed to power sensors")
@@ -128,7 +141,7 @@ class PowerMonitor:
         added = event.get("a") or {}
         changed = event.get("c") or {}
         # Battery first, so a transition in the same message reports the current level.
-        for entity in (self._config.battery_entity, self._config.voltage_entity):
+        for entity in (self._config.battery_entity, self._config.battery_power_entity, self._config.voltage_entity):
             if entity in added:
                 state = added[entity]
                 await self._observe(entity, state.get("s"), state.get("lc") or state.get("lu"), from_snapshot=True)
@@ -140,6 +153,10 @@ class PowerMonitor:
     async def _observe(self, entity: str, value: object, changed_ts: Optional[float], from_snapshot: bool) -> None:
         if entity == self._config.battery_entity:
             self._battery = parse_battery(value)
+            self.battery_soc = parse_number(value)
+            return
+        if entity == self._config.battery_power_entity:
+            self.battery_w = parse_number(value)
             return
         status = parse_voltage(value, self._config.min_voltage)
         if status is None:

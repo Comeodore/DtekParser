@@ -53,10 +53,12 @@ def scheduled_status(snapshot: Snapshot, now: datetime, lang: str) -> Optional[d
     return {"state": state, "start": " / ".join(dict.fromkeys(starts)), "end": " / ".join(dict.fromkeys(ends))}
 
 
-def schedule_payload(collector: SourceCollector, now: datetime, inverter: Optional[dict] = None) -> dict:
+def schedule_payload(collector: SourceCollector, now: datetime, inverter: Optional[dict] = None,
+                     batteries: Optional[list[dict]] = None) -> dict:
     cfg = collector.config
     payload = {
         "inverter": inverter,
+        "batteries": batteries or [],
         "source": cfg.name,
         "parser_type": cfg.name,
         "lang": cfg.lang,
@@ -129,12 +131,24 @@ def create_app(service: Service) -> FastAPI:
     async def info():
         return {"service": "DTEK service", "version": APP_VERSION}
 
+    def batteries_for(name: str, now: datetime) -> list[dict]:
+        """The home battery (HA) first, then the Deye ones, for the source they are shown with."""
+        rows = []
+        power = service.power
+        if power is not None and power.source == name and power.battery_payload() is not None:
+            rows.append(power.battery_payload())
+        monitor = service.inverter
+        if monitor is not None and monitor.config.batteries_source == name:
+            rows += monitor.batteries_payload(now)
+        return rows
+
     @app.get("/api/v1/schedule")
     async def schedule(request: Request, source: Optional[str] = Query(None)):
         collector, now = resolve(request, source), now_kyiv()
         monitor = service.inverter
         inverter = monitor.payload(now) if monitor is not None and monitor.source == collector.name else None
-        return JSONResponse(schedule_payload(collector, now, inverter), headers=NO_CACHE)
+        payload = schedule_payload(collector, now, inverter, batteries_for(collector.name, now))
+        return JSONResponse(payload, headers=NO_CACHE)
 
     @app.get("/api/v1/schedule/today")
     async def schedule_today(request: Request, source: Optional[str] = Query(None)):

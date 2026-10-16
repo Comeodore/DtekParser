@@ -50,6 +50,13 @@ def parse_voltage(raw: object, min_voltage: float) -> Optional[PowerStatus]:
     return PowerStatus.ON if voltage >= min_voltage else PowerStatus.OFF
 
 
+def parse_number(raw: object) -> Optional[float]:
+    try:
+        return float(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_battery(raw: object) -> str:
     try:
         return f"{round(float(raw))}%"  # type: ignore[arg-type]

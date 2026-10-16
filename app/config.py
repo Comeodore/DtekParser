@@ -49,6 +49,7 @@ class PowerConfig:
     token: str
     voltage_entity: str
     battery_entity: str
+    battery_power_entity: str   # positive while charging; for the mini app's batteries row
     source: str             # whose schedule and chats the power messages use
     min_voltage: float
 
@@ -65,6 +66,9 @@ class DeyeConfig:
     base_url: str
     interval: float
     min_grid_voltage: float
+    # Other inverters read in the same call, shown as batteries in another source's mini app.
+    batteries: tuple[tuple[str, str], ...] = ()     # (name, device SN)
+    batteries_source: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +130,22 @@ def _chat_ids(env: Mapping[str, str], key: str) -> tuple[str, ...]:
     return tuple(c.strip() for c in (_get(env, key) or "").split(",") if c.strip())
 
 
+def _batteries(env: Mapping[str, str]) -> tuple[tuple[str, str], ...]:
+    """DEYE_BATTERIES=elevator:2407244424,water:2407244735 → (("elevator", "2407244424"), ...)."""
+    pairs = []
+    for entry in (_get(env, "DEYE_BATTERIES") or "").split(","):
+        if not entry.strip():
+            continue
+        name, _, sn = entry.partition(":")
+        if not name.strip() or not sn.strip():
+            raise ConfigError(f"DEYE_BATTERIES entry {entry.strip()!r} is not name:serial")
+        pairs.append((name.strip().lower(), sn.strip()))
+    # device/latest takes up to 10 devices, one of them the main inverter.
+    if len(pairs) > 9:
+        raise ConfigError("DEYE_BATTERIES takes at most 9 inverters")
+    return tuple(pairs)
+
+
 def _source(env: Mapping[str, str], name: str, index: int) -> SourceConfig:
     p = name.upper() + "_"
     lang = _get(env, p + "LANG", "uk")
@@ -179,6 +199,7 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
             token=_require(env, "HA_TOKEN"),
             voltage_entity=_get(env, "HA_VOLTAGE_ENTITY", "sensor.victron_vebus_activein_l1_voltage_228"),
             battery_entity=_get(env, "HA_BATTERY_ENTITY", "sensor.victron_battery_soc"),
+            battery_power_entity=_get(env, "HA_BATTERY_POWER_ENTITY", "sensor.victron_system_battery_power"),
             source=power_source,
             min_voltage=float(_get(env, "POWER_MIN_VOLTAGE", "50")),
         )
@@ -191,6 +212,10 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         password = _require(env, "DEYE_PASSWORD_SHA256").lower()
         if len(password) != 64 or any(c not in "0123456789abcdef" for c in password):
             raise ConfigError("DEYE_PASSWORD_SHA256 must be the 64-character sha256 hex of the password")
+        batteries = _batteries(env)
+        batteries_source = _get(env, "DEYE_BATTERIES_SOURCE", sources[0].name) if batteries else None
+        if batteries_source is not None and batteries_source not in names:
+            raise ConfigError(f"DEYE_BATTERIES_SOURCE={batteries_source!r} is not in SOURCES")
         deye = DeyeConfig(
             app_id=_require(env, "DEYE_APP_ID"),
             app_secret=_require(env, "DEYE_APP_SECRET"),
@@ -202,6 +227,8 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
             base_url=_get(env, "DEYE_BASE_URL", "https://eu1-developer.deyecloud.com").rstrip("/"),
             interval=float(_get(env, "DEYE_INTERVAL", "60")),
             min_grid_voltage=float(_get(env, "DEYE_MIN_GRID_VOLTAGE", "100")),
+            batteries=batteries,
+            batteries_source=batteries_source,
         )
 
     return Settings(

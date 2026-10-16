@@ -83,6 +83,22 @@ async def test_unavailable_sensor_is_ignored(monitor):
     assert store.queued() == [] and store.data.power.status is PowerStatus.ON
 
 
+async def test_home_battery_follows_ha(monitor):
+    mon, store, _ = monitor
+    await mon.restore()
+    soc, power = mon._config.battery_entity, mon._config.battery_power_entity
+    assert mon.battery_payload() is None
+    await mon._handle({"id": 1, "type": "event", "event": {"a": {
+        soc: {"s": "86.0", "lc": 1.0}, power: {"s": "1026.0", "lc": 1.0},
+    }}})
+    mon.connected = True
+    assert mon.battery_payload() == {"name": "home", "soc": 86.0, "battery_w": 1026.0, "stale": False}
+    await mon._handle({"id": 1, "type": "event", "event": {"c": {power: {"+": {"s": "-2767.0"}}}}})
+    mon.connected = False
+    assert mon.battery_payload()["battery_w"] == -2767.0 and mon.battery_payload()["stale"]
+    assert store.queued() == []
+
+
 async def test_empty_database_is_initialised_silently(monitor):
     mon, store, _ = monitor
     await mon.restore()

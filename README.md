@@ -21,6 +21,10 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   refresh rate.
   The krem badge itself follows the schedule, as dtek-krem posts no outage
   notices.
+- **Batteries (kem).** The kem mini app shows three batteries: Home (Victron,
+  live from the same Home Assistant subscription as the power monitor) and
+  the building's Elevator and Water Deye inverters, read in the very same
+  Deye call as the krem one (`DEYE_BATTERIES`), so they cost no extra quota.
 - **Mini app and API.** Each source's port serves its Telegram mini app and
   `/api/v1/*`: kem on 9999, krem on 9998.
 - **Wake-on-LAN.** `POST /api/v1/wol` is kept for HA's
