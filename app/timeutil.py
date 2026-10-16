@@ -56,8 +56,9 @@ def format_duration(seconds: float, lang: str) -> str:
     days, rest = divmod(seconds, 86400)
     hours, rest = divmod(rest, 3600)
     minutes = rest // 60
-    units = ("d", "h", "m") if lang == "en" else ("д", "г", "хв")
-    parts = [f"{v}{u}" for v, u in zip((days, hours, minutes), units) if v]
+    # "2d 3h 5m", but "2 дн 3 год 5 хв": glued Ukrainian units read badly.
+    units, gap = (("d", "h", "m"), "") if lang == "en" else (("дн", "год", "хв"), " ")
+    parts = [f"{v}{gap}{u}" for v, u in zip((days, hours, minutes), units) if v]
     if parts:
         return " ".join(parts)
     return "less than a minute" if lang == "en" else "менше хвилини"

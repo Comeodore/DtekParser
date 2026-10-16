@@ -11,6 +11,7 @@ from app.notify.router import Router
 from app.power.state import PowerState, PowerStatus
 from app.service import Service
 from app.storage.memory import MemoryStore
+from app.timeutil import format_duration
 from tests.conftest import BASE_ENV, fixture, kyiv, one, snapshot
 
 DEYE_ENV = {
@@ -164,14 +165,19 @@ async def test_grid_loss_and_return_reach_krem_chats():
     await monitor.poll(FakeReader(off))
     lost = store.queued()
     assert [m.chat_id for m in lost] == ["222", "333"]
-    assert "СВІТЛО ЗНИКЛО" in lost[0].text and "<b>88%</b>" in lost[0].text
     # The schedule has power off 18:00-21:00, so this is the scheduled outage and its end is known.
-    assert "За графіком" in lost[0].text and "21:00" in lost[0].text
-    assert "Помічено" not in lost[0].text                           # a minute-old reading is not a late notice
+    # A minute-old reading is not a late notice, so no "noticed after a reconnect" line either.
+    assert lost[0].text == ("🔴 <b>Світло зникло</b>\n\n⏱ Було світло: <b>2 хв</b>\n🔋 Батарея: <b>88%</b>\n\n"
+                            "⚡ За графіком, відновлення о <b>21:00</b>")
     assert store.data.power_slots[2] == PowerState(PowerStatus.OFF, off.at) and store.data.power is None
     now[0] = kyiv(2026, 10, 16, 18, 41)
     await monitor.poll(FakeReader(replace(off, at=kyiv(2026, 10, 16, 18, 40, 3), grid_present=True, grid_v=229.0)))
-    assert "СВІТЛО З'ЯВИЛОСЯ" in store.queued()[-1].text
+    assert store.queued()[-1].text.startswith("🟢 <b>Світло з'явилося</b>\n\n⏱ Не було світла: <b>38 хв</b>")
+
+
+def test_ukrainian_durations_are_spaced_words():
+    assert format_duration(2 * 86400 + 3 * 3600 + 5 * 60, "uk") == "2 дн 3 год 5 хв"
+    assert format_duration(2 * 86400 + 3 * 3600 + 5 * 60, "en") == "2d 3h 5m"
 
 
 async def test_grid_change_while_the_service_was_down_says_so():

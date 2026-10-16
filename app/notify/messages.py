@@ -39,7 +39,8 @@ TEXT = {
         "uptime": "Uptime",
         "duration": "Outage duration",
         "battery": "Battery",
-        "scheduled": "⚡ Scheduled",
+        "scheduled_end": "⚡ Scheduled\n🕐 Restoration: {at}",
+        "at": "",
         "unscheduled": "⚠️ Unscheduled outage",
         "dtek": "DTEK",
         "late_off": "ℹ️ Noticed after a reconnect, power went off at {time}",
@@ -67,12 +68,13 @@ TEXT = {
         "until": "до",
         "suspended": "⚠️ Графіки погодинних відключень зараз не діють, час відновлення може змінюватися.",
         "next_outage": "Наступне відключення",
-        "power_off": "СВІТЛО ЗНИКЛО",
-        "power_on": "СВІТЛО З'ЯВИЛОСЯ",
+        "power_off": "Світло зникло",
+        "power_on": "Світло з'явилося",
         "uptime": "Було світло",
-        "duration": "Тривалість відключення",
+        "duration": "Не було світла",
         "battery": "Батарея",
-        "scheduled": "⚡ За графіком",
+        "scheduled_end": "⚡ За графіком, відновлення {at}",
+        "at": "о ",
         "unscheduled": "⚠️ Поза графіком",
         "dtek": "ДТЕК",
         "late_off": "ℹ️ Помічено після перепідключення, світло зникло о {time}",
@@ -267,7 +269,9 @@ def render_power(transition: PowerTransition, snapshot: Optional[Snapshot], now:
     )
     end = scheduled_end(snapshot, transition.at, lang)
     if end:
-        text += f"\n\n{_t(lang, 'scheduled')}\n🕐 {_t(lang, 'restoration')}: <b>{end}</b>"
+        # "о 21:00" but "завтра 02:00": the preposition only fits a bare time.
+        at = (_t(lang, "at") if end[:1].isdigit() else "") + f"<b>{end}</b>"
+        text += "\n\n" + _t(lang, "scheduled_end").format(at=at)
     else:
         text += f"\n\n{_t(lang, 'unscheduled')}"
     outage = snapshot.outage if snapshot else None
