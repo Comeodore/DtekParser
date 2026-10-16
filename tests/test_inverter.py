@@ -57,7 +57,8 @@ def test_payload_marks_old_readings():
     fresh = r.to_dict(kyiv(2026, 10, 16, 17, 30), stale_after_s=900)
     assert fresh["time"] == "17:22" and not fresh["stale"]
     assert r.to_dict(kyiv(2026, 10, 16, 17, 40), stale_after_s=900)["stale"]
-    assert r.to_dict(kyiv(2026, 10, 17, 7, 0), stale_after_s=900)["time"] == "16.10 17:22"
+    yesterday = r.to_dict(kyiv(2026, 10, 17, 7, 0), stale_after_s=900)
+    assert yesterday["time"] == "17:22" and yesterday["stale"]
 
 
 class FakeReader:

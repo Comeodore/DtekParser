@@ -42,11 +42,10 @@ class InverterReading:
     grid_present: bool
 
     def to_dict(self, now: datetime, stale_after_s: float) -> dict:
-        local = self.at.astimezone(KYIV_TZ)
-        same_day = local.date() == now.astimezone(KYIV_TZ).date()
         return {
             "at": self.at.isoformat(),
-            "time": local.strftime("%H:%M" if same_day else "%d.%m %H:%M"),
+            # Time only, even for yesterday's reading: the stale flag is what says it is old.
+            "time": self.at.astimezone(KYIV_TZ).strftime("%H:%M"),
             "stale": (now - self.at).total_seconds() > stale_after_s,
             "soc": self.soc,
             "battery_w": self.battery_w,
