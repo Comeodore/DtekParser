@@ -12,10 +12,13 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   krem → `@dtek_parser_bot` (Ukrainian).
 - **Power.** It watches the Victron AC-input voltage in Home Assistant and
   reports outages and restores to the kem chats, with schedule context.
-- **Inverter (krem).** Every minute it reads the Deye inverter in Круглик from
-  Deye Cloud (`device/latest`; the logger uploads every ~72 s) and shows grid,
-  battery, consumption and solar in the krem mini app. Settings are `DEYE_*`;
-  `tools/deye_probe.py` lists the stations and measures the refresh rate.
+- **Inverter (krem).** It reads the Deye inverter in Круглик from Deye Cloud
+  (`device/latest`) and shows grid, battery, consumption and solar in the krem
+  mini app. The logger uploads every ~72 s and Deye has no push, so polls are
+  timed to land just after the next reading reaches the cloud (`/health`
+  shows the cadence, the lag and the calls per reading). Settings are
+  `DEYE_*`; `tools/deye_probe.py` lists the stations and measures the
+  refresh rate.
   The krem badge itself follows the schedule, as dtek-krem posts no outage
   notices.
 - **Mini app and API.** Each source's port serves its Telegram mini app and

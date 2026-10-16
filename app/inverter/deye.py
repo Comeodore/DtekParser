@@ -1,17 +1,22 @@
 """The krem inverter, read from Deye Cloud's OpenAPI (developer.deyecloud.com).
 
-The cloud only has what the inverter's Wi-Fi logger uploads, every 1 or 5
-minutes, so polling faster than DEYE_INTERVAL only burns the monthly quota.
-device/latest is used rather than station/latest: Deye refreshes station
-summaries at most every 5 minutes.
+The cloud only has what the inverter's Wi-Fi logger uploads (the krem one:
+every ~72 s), and Deye has no push, so polls are timed to that rhythm: the
+next one goes out when the next reading should have reached the cloud, and
+repeats briefly while it is late. That shows a reading about as soon as Deye
+has it, at roughly one or two calls per reading, well within the monthly
+quota. device/latest is used rather than station/latest, which Deye
+documents as refreshed at most every 5 minutes.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import statistics
 import time
+from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Optional, Protocol
 
 import aiohttp
@@ -166,6 +171,13 @@ class InverterMonitor:
     # Older than this, the mini app marks the reading as outdated.
     STALE_S = 15 * 60
     MAX_BACKOFF_S = 15 * 60
+    # Upload rhythm until readings show the real one (the krem logger: 72 s, measured 16.10).
+    CADENCE_S = 72.0
+    # Deye Cloud has a reading 12-54 s after the logger took it (16.10); aim past most of that.
+    INGEST_S = 30.0
+    # How often to look again while the expected reading is late.
+    RETRY_S = 15.0
+    MIN_WAIT_S = 5.0
 
     def __init__(self, config: DeyeConfig, clock: Callable[[], datetime] = now_kyiv):
         self.config = config
@@ -175,6 +187,33 @@ class InverterMonitor:
         self.last_success: Optional[datetime] = None
         self.last_error = ""
         self.failures = 0
+        self._gaps: deque[float] = deque(maxlen=5)
+        # For /health: how fresh readings are when seen, and what that costs in calls.
+        self.calls = 0
+        self.readings = 0
+        self.last_lag_s: Optional[float] = None
+
+    @property
+    def cadence(self) -> float:
+        """Seconds between uploads; a median, so an upload the logger skipped does not double it."""
+        return statistics.median(self._gaps) if self._gaps else self.CADENCE_S
+
+    def next_wait(self, now: datetime) -> float:
+        """Until the next reading should be in the cloud; short retries while it is late.
+
+        Once it is a whole cadence late the logger is probably offline, and
+        polling falls back to DEYE_INTERVAL rather than retrying all night.
+        """
+        if self.latest is None:
+            return self.config.interval
+        due = self.latest.at + timedelta(seconds=self.cadence + self.INGEST_S)
+        until_due = (due - now).total_seconds()
+        if until_due > 0:
+            # Capped, so a logger clock running ahead cannot park the poller.
+            return max(self.MIN_WAIT_S, min(until_due, self.cadence + self.INGEST_S))
+        if -until_due < self.cadence:
+            return self.RETRY_S
+        return self.config.interval
 
     async def run(self) -> None:
         timeout = aiohttp.ClientTimeout(total=30)
@@ -185,6 +224,7 @@ class InverterMonitor:
 
     async def poll(self, reader: Reader) -> float:
         """One fetch; returns how long to wait before the next."""
+        self.calls += 1
         try:
             reading = await reader.latest()
         except asyncio.CancelledError:
@@ -195,16 +235,25 @@ class InverterMonitor:
             if self.failures == 1 or self.failures % 10 == 0:
                 logger.warning(f"Deye fetch failed ({self.failures} in a row): {self.last_error}")
             return min(self.config.interval * 2 ** min(self.failures, 4), self.MAX_BACKOFF_S)
+        if self.latest is not None and reading.at > self.latest.at:
+            gap = (reading.at - self.latest.at).total_seconds()
+            if 20 <= gap <= 900:
+                self._gaps.append(gap)
         if self.latest is not None and reading.grid_present != self.latest.grid_present:
             logger.info(f"Deye: grid {'back' if reading.grid_present else 'lost'} at {self.source} "
                         f"({reading.grid_v} V at {reading.at:%H:%M})")
         if self.failures:
             logger.info(f"Deye fetch recovered after {self.failures} failures")
-        self.latest = reading
-        self.last_success = self._clock()
+        now = self._clock()
+        if self.latest is None or reading.at > self.latest.at:
+            self.readings += 1
+            self.last_lag_s = round((now - reading.at).total_seconds())
+        if self.latest is None or reading.at >= self.latest.at:
+            self.latest = reading
+        self.last_success = now
         self.last_error = ""
         self.failures = 0
-        return self.config.interval
+        return self.next_wait(self.last_success)
 
     def payload(self, now: datetime) -> Optional[dict]:
         return self.latest.to_dict(now, self.STALE_S) if self.latest else None

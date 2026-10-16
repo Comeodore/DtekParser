@@ -177,6 +177,9 @@ def create_app(service: Service) -> FastAPI:
                 "collected_at": m.latest.at.isoformat() if m.latest else None,
                 "failures": m.failures,
                 "last_error": m.last_error or None,
+                "cadence_s": m.cadence,
+                "last_lag_s": m.last_lag_s,
+                "calls_per_reading": round(m.calls / m.readings, 2) if m.readings else None,
             }
         problems = service.problems(now)
         ok = not problems

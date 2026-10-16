@@ -1,3 +1,6 @@
+from dataclasses import replace
+from datetime import timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -72,14 +75,44 @@ class FakeReader:
         return result
 
 
+def deye_config():
+    return load_settings({**BASE_ENV, **DEYE_ENV}).deye
+
+
 async def test_monitor_keeps_last_reading_and_backs_off():
-    monitor = InverterMonitor(load_settings({**BASE_ENV, **DEYE_ENV}).deye, clock=lambda: kyiv(2026, 10, 16, 17, 23))
+    monitor = InverterMonitor(deye_config(), clock=lambda: kyiv(2026, 10, 16, 17, 23))
     reading = parse_device_latest(device(), 100)
-    assert await monitor.poll(FakeReader(reading)) == 60
+    assert await monitor.poll(FakeReader(reading)) == 45
     waits = [await monitor.poll(FakeReader(DeyeError("rate limited"))) for _ in range(3)]
     assert waits == [120, 240, 480]
     assert monitor.latest is reading and monitor.failures == 3 and "rate limited" in monitor.last_error
-    assert await monitor.poll(FakeReader(reading)) == 60 and monitor.failures == 0
+    assert await monitor.poll(FakeReader(reading)) == 45 and monitor.failures == 0
+
+
+async def test_polls_follow_the_loggers_rhythm():
+    now = [kyiv(2026, 10, 16, 17, 23, 0)]
+    monitor = InverterMonitor(deye_config(), clock=lambda: now[0])
+    first = parse_device_latest(device(), 100)                      # taken 17:22:03
+    # The next one should reach the cloud 72 + 30 s after that, at 17:23:45.
+    assert await monitor.poll(FakeReader(first)) == 45
+    now[0] = kyiv(2026, 10, 16, 17, 23, 45)
+    assert await monitor.poll(FakeReader(first)) == 15              # not there yet: look again soon
+    second = replace(first, at=kyiv(2026, 10, 16, 17, 23, 15))
+    now[0] = kyiv(2026, 10, 16, 17, 23, 50)
+    assert await monitor.poll(FakeReader(second)) == 67             # next due 17:24:57
+    assert (monitor.cadence, monitor.last_lag_s, monitor.readings, monitor.calls) == (72, 35, 2, 3)
+    now[0] = kyiv(2026, 10, 16, 17, 26, 20)
+    # A whole upload late: the logger is likely offline, back to the plain interval.
+    assert await monitor.poll(FakeReader(second)) == 60
+
+
+def test_schedule_survives_skipped_uploads_and_skewed_clocks():
+    monitor = InverterMonitor(deye_config())
+    monitor._gaps.extend([72, 144, 73])
+    assert monitor.cadence == 73
+    monitor.latest = parse_device_latest(device(), 100)
+    ahead = monitor.latest.at - timedelta(hours=1)                  # logger clock an hour fast
+    assert monitor.next_wait(ahead) == 73 + 30
 
 
 def test_deye_settings():
@@ -108,4 +141,5 @@ def test_only_the_inverters_source_gets_it(monkeypatch):
     inverter = http.get("/api/v1/schedule?source=krem").json()["inverter"]
     assert inverter["grid_w"] == 2861 and inverter["battery_w"] == 2613 and inverter["time"] == "17:22"
     assert http.get("/api/v1/schedule?source=kem").json()["inverter"] is None
-    assert http.get("/api/v1/health").json()["inverter"]["source"] == "krem"
+    health = http.get("/api/v1/health").json()["inverter"]
+    assert health["source"] == "krem" and health["cadence_s"] == 72 and health["calls_per_reading"] is None
