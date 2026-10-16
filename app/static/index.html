@@ -423,8 +423,8 @@
 
         .hidden { display: none !important; }
 
-        /* Telegram Desktop opens the mini app about 600px tall: tighten so the status card and
-           today's schedule fit without scrolling. Phones keep the roomier layout. */
+        /* Telegram Desktop opens the mini app about 600px tall: tighten the spacing so the status card
+           and today's schedule fit without scrolling. The diagram keeps its size. */
         @media (max-height: 720px) {
             body { padding: var(--spacing-md); }
             .container { gap: var(--spacing-sm); }
@@ -433,13 +433,6 @@
             .status-row { padding-bottom: var(--spacing-sm); }
             .info-row { padding: 7px 0; }
             .inverter { padding: var(--spacing-sm) 8px 8px; }
-            #hubSun { display: flex; align-items: center; gap: 6px; padding: 4px 10px; }
-            #hubSun svg { margin: 0; }
-            .hub-vline { height: 12px; }
-            .hub-row .hub-node { padding: 5px 6px; }
-            .hub-home { width: 78px; height: 78px; }
-            .hub-home svg { width: 18px; height: 18px; }
-            .hub-home .hub-value { font-size: 15px; }
             .inverter-footer { margin-top: 6px; padding-top: 6px; font-size: 12px; }
             .schedule-header { padding-bottom: var(--spacing-sm); margin-bottom: var(--spacing-sm); }
             .schedule-footer { margin-top: var(--spacing-sm); padding-top: var(--spacing-sm); }
