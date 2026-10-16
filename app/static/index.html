@@ -73,6 +73,17 @@
             to { opacity: 1; transform: translateY(0); }
         }
 
+        .card.no-anim { animation: none; }
+
+        /* Schedule updates: a new day fades in where it stands, changed hours flash; nothing moves. */
+        .card.fade-in { animation: fadeOnly 0.4s ease; }
+        @keyframes fadeOnly { from { opacity: 0; } to { opacity: 1; } }
+        .hour.changed { animation: cellFlash 1.6s ease-out; }
+        @keyframes cellFlash {
+            from { box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.95); }
+            to { box-shadow: 0 0 0 2px rgba(255, 255, 255, 0); }
+        }
+
         .status-badge {
             display: inline-flex;
             align-items: center;
@@ -262,7 +273,6 @@
             transform: translateX(-50%) translateY(0);
         }
 
-        .toast.success { background: rgba(48, 209, 88, 0.9); }
         .toast.error { background: rgba(255, 69, 58, 0.9); }
 
         .skeleton {
@@ -386,6 +396,9 @@
         .hub-vline .line { width: 2px; flex: 1; background: currentColor; }
         .hub-vline svg { width: 12px; height: 8px; margin: 0; display: none; }
         .hub-vline.to-home svg { display: block; }
+        @media (prefers-reduced-motion: reduce) {
+            .hour.changed, .card { animation: none !important; }
+        }
 
         .inverter-footer {
             display: flex;
@@ -547,7 +560,6 @@
                 voluntary: 'Ask the building management for the outage schedule.',
                 otherOperator: 'Power at this address is managed by another operator.',
                 stale: 'Data may be outdated, last successful update',
-                updated: '✅ Updated',
                 loadError: '⚠️ Load error',
                 grid: 'Grid',
                 gridOn: 'On',
@@ -587,7 +599,6 @@
                 voluntary: 'Графік відключень уточнюйте в ОСББ/ЖЕК/керуючій компанії.',
                 otherOperator: 'Електропостачання за цією адресою забезпечує інша компанія.',
                 stale: 'Дані можуть бути застарілими, останнє оновлення',
-                updated: '✅ Оновлено',
                 loadError: '⚠️ Помилка',
                 grid: 'Мережа',
                 gridOn: 'Є',
@@ -606,7 +617,9 @@
         const state = {
             tg: window.Telegram?.WebApp,
             lang: 'en',
-            prevVersion: null,
+            daysKey: null,
+            datesSeen: new Set(),
+            slotsSeen: {},          // "date|line" → slots as last shown, to flash the hours that change
             isFirst: true
         };
 
@@ -650,12 +663,13 @@
             power_off_second_30: 'half-second'
         };
 
-        const renderGrid = (slots, isToday) => {
+        const renderGrid = (slots, isToday, before) => {
             const grid = el('div', 'schedule-grid');
             const hour = new Date().getHours();
             slots.forEach((status, h) => {
                 const current = isToday && h === hour ? ' current' : '';
-                grid.appendChild(el('div', `hour ${STATUS_CLASS[status] || 'on'}${current}`, String(h)));
+                const changed = before && before[h] !== status ? ' changed' : '';
+                grid.appendChild(el('div', `hour ${STATUS_CLASS[status] || 'on'}${current}${changed}`, String(h)));
             });
             return grid;
         };
@@ -695,7 +709,7 @@
             const multi = day.lines.length > 1;
             day.lines.forEach((line, i) => {
                 if (multi) card.appendChild(el('div', 'line-title', `${t('line')} ${i + 1} · ${line.name}`));
-                card.appendChild(renderGrid(line.slots, day.is_today));
+                card.appendChild(renderGrid(line.slots, day.is_today, state.slotsSeen[`${day.date}|${i}`]));
                 if (!multi) card.appendChild(renderStats(line.slots));
             });
             return card;
@@ -849,23 +863,31 @@
                 document.documentElement.lang = state.lang;
                 updateLabels();
 
-                const version = `${data.outage_updated}|${data.schedule_updated}|${JSON.stringify(data.outage)}`;
-                const changed = state.prevVersion !== null && state.prevVersion !== version;
-                state.prevVersion = version;
-
                 renderStatus(currentStatus(data), data.outage_updated);
                 renderNotices(data);
                 renderInverter(data.inverter);
                 renderBatteries(data.batteries || []);
 
-                const days = $('days');
-                days.replaceChildren(...(data.days || []).map(renderDay));
+                // Rebuilt only when the schedule or the highlighted hour changes, and then without the
+                // card fade-in: replacing the cards on every 10 s refresh made them jump up each time.
+                const daysKey = `${JSON.stringify(data.days || [])}|${new Date().getHours()}`;
+                if (daysKey !== state.daysKey) {
+                    const first = state.daysKey === null;
+                    const cards = (data.days || []).map(day => {
+                        const card = renderDay(day);
+                        // A known day keeps still (its changed hours flash); a new one only fades in in place.
+                        if (!first) card.classList.add(state.datesSeen.has(day.date) ? 'no-anim' : 'fade-in');
+                        return card;
+                    });
+                    $('days').replaceChildren(...cards);
+                    state.daysKey = daysKey;
+                    (data.days || []).forEach(day => {
+                        state.datesSeen.add(day.date);
+                        day.lines.forEach((line, i) => { state.slotsSeen[`${day.date}|${i}`] = line.slots; });
+                    });
+                }
                 $('noScheduleCard').classList.toggle('hidden', (data.days || []).length > 0 || data.schedules_suspended);
 
-                if (!state.isFirst && changed) {
-                    showToast(t('updated'), 'success');
-                    haptic('success');
-                }
                 state.isFirst = false;
             } catch (err) {
                 console.error('Fetch error:', err);
