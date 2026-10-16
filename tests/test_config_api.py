@@ -1,14 +1,15 @@
 import time
+from datetime import date
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api import create_app
+from app.api import create_app, scheduled_status
 from app.config import ConfigError, load_settings
 from app.service import Service
 from app.storage.memory import MemoryStore
 from app.wol import magic_packet
-from tests.conftest import BASE_ENV, emergency, kyiv, one, snapshot
+from tests.conftest import BASE_ENV, day, emergency, kyiv, one, slots, snapshot
 
 
 def test_settings(settings):
@@ -54,10 +55,30 @@ def test_schedule_for_explicit_source(client, monkeypatch):
     body = http.get("/api/v1/schedule?source=kem").json()
     assert body["lang"] == "en" and body["healthy"]
     assert body["outage"]["kind"] == "emergency"
+    assert body["scheduled_status"] == {"state": "on", "start": "", "end": ""}
     assert body["current_outage"]["status"] == "emergency"
     assert [s["hour"] for s in body["today"]["slots"] if s["status"] != "power_on"] == [16, 17, 18]
     assert body["days"][0]["lines"][0]["name"] == "Черга 4.1"
     assert "address" not in body
+
+
+@pytest.mark.parametrize("at, expected", [
+    (kyiv(2026, 10, 1, 9), {"state": "on", "start": "", "end": ""}),
+    (kyiv(2026, 10, 1, 12, 15), {"state": "maybe", "start": "12:00", "end": "14:00"}),
+    (kyiv(2026, 10, 1, 13, 40), {"state": "off", "start": "12:00 / 13:30", "end": "14:00 / 15:00"}),
+    (kyiv(2026, 10, 1, 23, 10), {"state": "off", "start": "22:00", "end": "завтра 02:00"}),
+])
+def test_scheduled_status(at, expected):
+    today = day(date(2026, 10, 1), ("GPV3.1", slots(off=[12, 13, 22, 23])), ("GPV2.2", slots(off=[14, 22, 23], second=[13])))
+    tomorrow = day(date(2026, 10, 2), ("GPV3.1", slots(off=[0, 1])), ("GPV2.2", slots(off=[0, 1])))
+    assert scheduled_status(snapshot([today, tomorrow], source="krem"), at, "uk") == expected
+
+
+def test_no_scheduled_status_without_a_schedule_in_force():
+    now = kyiv(2026, 10, 1, 12)
+    assert scheduled_status(snapshot([one(date(2026, 10, 2), [12])]), now, "en") is None
+    suspended = snapshot([one(now.date(), [12])], outage=emergency(suspended=True))
+    assert scheduled_status(suspended, now, "en") is None
 
 
 def test_source_without_data_yet(client):

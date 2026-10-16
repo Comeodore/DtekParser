@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -14,8 +14,10 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.collector import SourceCollector
 from app.dtek.legacy import legacy_row
+from app.dtek.models import Snapshot
+from app.engine.periods import continues_into, current_period
 from app.service import Service
-from app.timeutil import KYIV_TZ, now_kyiv
+from app.timeutil import KYIV_TZ, MINUTES_IN_DAY, format_moment, minute_of_day, now_kyiv
 from app.wol import send_magic_packet
 
 logger = logging.getLogger(__name__)
@@ -23,6 +25,32 @@ logger = logging.getLogger(__name__)
 APP_VERSION = "3.0.0"
 STATIC_DIR = Path(__file__).parent / "static"
 NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"}
+
+
+def scheduled_status(snapshot: Snapshot, now: datetime, lang: str) -> Optional[dict]:
+    """Power right now according to today's schedule; None when there is no schedule to go by.
+
+    "maybe" is a house fed by several lines with only some of them off.
+    """
+    today = now.astimezone(KYIV_TZ).date()
+    day = snapshot.day(today)
+    if snapshot.schedules_suspended or day is None or not day.lines:
+        return None
+    minute = minute_of_day(now)
+    midnight = datetime.combine(today, time(), KYIV_TZ)
+    tomorrow = snapshot.day(today + timedelta(days=1))
+    starts, ends = [], []
+    for line in day.lines:
+        period = current_period(line.slots, minute)
+        if period is None:
+            continue
+        following = next((l for l in tomorrow.lines if l.group == line.group), None) if tomorrow else None
+        tail = continues_into(line.slots, following.slots if following else None, period)
+        end = period[1] if tail is None else MINUTES_IN_DAY + tail
+        starts.append(format_moment(midnight + timedelta(minutes=period[0]), today, lang))
+        ends.append(format_moment(midnight + timedelta(minutes=end), today, lang))
+    state = "on" if not ends else "off" if len(ends) == len(day.lines) else "maybe"
+    return {"state": state, "start": " / ".join(dict.fromkeys(starts)), "end": " / ".join(dict.fromkeys(ends))}
 
 
 def schedule_payload(collector: SourceCollector, now: datetime) -> dict:
@@ -37,6 +65,7 @@ def schedule_payload(collector: SourceCollector, now: datetime) -> dict:
         "today": None,
         "tomorrow": None,
         "outage": None,
+        "scheduled_status": None,
         "days": [],
         "schedule_updated": "",
         "outage_updated": "",
@@ -53,6 +82,7 @@ def schedule_payload(collector: SourceCollector, now: datetime) -> dict:
         today=legacy["today"],
         tomorrow=legacy["tomorrow"],
         outage=snapshot.outage.to_dict() if snapshot.outage else None,
+        scheduled_status=scheduled_status(snapshot, now, cfg.lang),
         days=[
             {"date": d.date.isoformat(), "label": d.date.strftime("%d.%m.%y"),
              "is_today": d.date == today, "lines": [line.to_dict() for line in d.lines]}

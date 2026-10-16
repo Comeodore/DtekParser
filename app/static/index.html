@@ -369,6 +369,8 @@
                 emergencyOutage: 'Emergency outage',
                 plannedOutage: 'Planned outage',
                 otherOutage: 'Outage',
+                scheduleOutage: 'Outage by schedule',
+                possibleOutage: 'Possible outage',
                 powerOn: 'Power on',
                 reason: 'Reason',
                 start: 'Start',
@@ -395,6 +397,8 @@
                 emergencyOutage: 'Аварійне відключення',
                 plannedOutage: 'Планове відключення',
                 otherOutage: 'Відключення',
+                scheduleOutage: 'Відключення за графіком',
+                possibleOutage: 'Можливе відключення',
                 powerOn: 'Світло є',
                 reason: 'Причина',
                 start: 'Початок',
@@ -515,22 +519,46 @@
             return card;
         };
 
-        const renderStatus = (outage, updated) => {
-            const badge = $('statusBadge');
-            const kind = outage ? outage.kind : null;
-            const badgeClass = { emergency: 'emergency', planned: 'planned', other: 'off' }[kind] || 'on';
-            const label = { emergency: 'emergencyOutage', planned: 'plannedOutage', other: 'otherOutage' }[kind] || 'powerOn';
-            badge.className = `status-badge ${badgeClass}`;
-            $('statusText').textContent = t(label);
-            $('statusRow').classList.remove('hidden');
+        // DTEK's region site doesn't post the "no power at your address" notice,
+        // so without one the krem badge follows the schedule instead.
+        const SCHEDULE_STATUS_SOURCES = ['krem'];
+
+        const currentStatus = data => {
+            const outage = data.outage;
+            if (outage || !SCHEDULE_STATUS_SOURCES.includes(data.source)) {
+                const kind = outage ? outage.kind : null;
+                return {
+                    badge: { emergency: 'emergency', planned: 'planned', other: 'off' }[kind] || 'on',
+                    label: { emergency: 'emergencyOutage', planned: 'plannedOutage', other: 'otherOutage' }[kind] || 'powerOn',
+                    reason: outage && outage.reason,
+                    start: outage && outage.start,
+                    end: outage && outage.end
+                };
+            }
+            const scheduled = data.scheduled_status;
+            if (!scheduled) return null;
+            return {
+                badge: { off: 'off', maybe: 'planned' }[scheduled.state] || 'on',
+                label: { off: 'scheduleOutage', maybe: 'possibleOutage' }[scheduled.state] || 'powerOn',
+                start: scheduled.start,
+                end: scheduled.end
+            };
+        };
+
+        const renderStatus = (status, updated) => {
+            $('statusRow').classList.toggle('hidden', !status);
+            if (status) {
+                $('statusBadge').className = `status-badge ${status.badge}`;
+                $('statusText').textContent = t(status.label);
+            }
 
             const detail = (rowId, valueId, value) => {
                 $(rowId).classList.toggle('hidden', !value);
                 if (value) $(valueId).textContent = value;
             };
-            detail('reasonRow', 'reasonText', outage && outage.reason);
-            detail('startRow', 'startTime', outage && outage.start);
-            detail('restorationRow', 'restorationTime', outage && outage.end);
+            detail('reasonRow', 'reasonText', status && status.reason);
+            detail('startRow', 'startTime', status && status.start);
+            detail('restorationRow', 'restorationTime', status && status.end);
             $('updatedTime').textContent = updated || '-';
         };
 
@@ -566,7 +594,7 @@
                 const changed = state.prevVersion !== null && state.prevVersion !== version;
                 state.prevVersion = version;
 
-                renderStatus(data.outage, data.outage_updated);
+                renderStatus(currentStatus(data), data.outage_updated);
                 renderNotices(data);
 
                 const days = $('days');
