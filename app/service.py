@@ -13,6 +13,7 @@ from app.collector import SourceCollector
 from app.config import Settings
 from app.dtek.client import BrowserPool, DtekSite
 from app.heartbeat import Heartbeat
+from app.inverter.deye import InverterMonitor
 from app.notify.outbox import Gateway, OutboxSender, TelegramGateway
 from app.notify.router import Router
 from app.power.monitor import PowerMonitor
@@ -68,6 +69,9 @@ class Service:
                 settings.power, self.store, self.router, snapshot=lambda: power_source.latest,
                 on_messages=self.outbox.wake,
             )
+        # Shown in its source's mini app only; deliberately not part of problems():
+        # a Deye Cloud hiccup must not pause the heartbeat.
+        self.inverter = InverterMonitor(settings.deye) if settings.deye is not None else None
         self._tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
@@ -82,11 +86,14 @@ class Service:
             self._spawn(f"collector[{collector.name}]", collector.run)
         if self.power is not None:
             self._spawn("power", self.power.run)
+        if self.inverter is not None:
+            self._spawn("inverter", self.inverter.run)
         self._spawn("heartbeat", self._heartbeat)
         if isinstance(self.store, PostgresStore):
             self._spawn("instance-lock", self._watch_lock)
+        inverter = f"deye→{self.inverter.source}" if self.inverter else "off"
         logger.info(f"Service started: sources={list(self.collectors)}, power={'on' if self.power else 'off'}, "
-                    f"dry_run={self.settings.dry_run}")
+                    f"inverter={inverter}, dry_run={self.settings.dry_run}")
 
     def problems(self, now: Optional[datetime] = None) -> list[str]:
         """Why the service is not fully working; empty when it is. Drives the heartbeat and /health."""

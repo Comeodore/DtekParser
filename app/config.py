@@ -54,6 +54,20 @@ class PowerConfig:
 
 
 @dataclass(frozen=True)
+class DeyeConfig:
+    app_id: str
+    app_secret: str
+    email: str
+    password_sha256: str    # Deye's token call takes the account password hashed
+    station_id: int
+    device_sn: Optional[str]    # the station's first inverter when not set
+    source: str             # whose mini app shows the inverter
+    base_url: str
+    interval: float
+    min_grid_voltage: float
+
+
+@dataclass(frozen=True)
 class Settings:
     database_url: str
     db_schema: str
@@ -65,6 +79,7 @@ class Settings:
     fetch_interval: float
     dry_run: bool
     state_dir: str = "data"     # per-source browser cookies, kept across restarts
+    deye: Optional[DeyeConfig] = None
 
     def source(self, name: str) -> SourceConfig:
         return next(s for s in self.sources if s.name == name)
@@ -168,6 +183,27 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
             min_voltage=float(_get(env, "POWER_MIN_VOLTAGE", "50")),
         )
 
+    deye = None
+    if _get(env, "DEYE_APP_ID"):
+        deye_source = _get(env, "DEYE_SOURCE", "krem")
+        if deye_source not in names:
+            raise ConfigError(f"DEYE_SOURCE={deye_source!r} is not in SOURCES")
+        password = _require(env, "DEYE_PASSWORD_SHA256").lower()
+        if len(password) != 64 or any(c not in "0123456789abcdef" for c in password):
+            raise ConfigError("DEYE_PASSWORD_SHA256 must be the 64-character sha256 hex of the password")
+        deye = DeyeConfig(
+            app_id=_require(env, "DEYE_APP_ID"),
+            app_secret=_require(env, "DEYE_APP_SECRET"),
+            email=_require(env, "DEYE_EMAIL"),
+            password_sha256=password,
+            station_id=_int(env, "DEYE_STATION_ID"),
+            device_sn=_get(env, "DEYE_DEVICE_SN"),
+            source=deye_source,
+            base_url=_get(env, "DEYE_BASE_URL", "https://eu1-developer.deyecloud.com").rstrip("/"),
+            interval=float(_get(env, "DEYE_INTERVAL", "60")),
+            min_grid_voltage=float(_get(env, "DEYE_MIN_GRID_VOLTAGE", "100")),
+        )
+
     return Settings(
         database_url=_require(env, "DATABASE_URL"),
         db_schema=_get(env, "DB_SCHEMA", "public"),
@@ -179,4 +215,5 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         fetch_interval=float(_get(env, "FETCH_INTERVAL", "60")),
         dry_run=_bool(env, "NOTIFY_DRY_RUN", False),
         state_dir=_get(env, "STATE_DIR", "data"),
+        deye=deye,
     )

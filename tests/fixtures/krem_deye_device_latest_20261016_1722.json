@@ -1,0 +1,141 @@
+{
+ "code": "1000000",
+ "msg": "success",
+ "success": true,
+ "requestId": "test",
+ "deviceDataList": [
+  {
+   "deviceSn": "2511090098",
+   "deviceType": "INVERTER",
+   "deviceState": 1,
+   "collectionTime": 1792160523,
+   "dataList": [
+    {
+     "key": "RatedPower",
+     "value": "6000.00",
+     "unit": "W"
+    },
+    {
+     "key": "DCVoltagePV1",
+     "value": "110.40",
+     "unit": "V"
+    },
+    {
+     "key": "DCVoltagePV2",
+     "value": "74.30",
+     "unit": "V"
+    },
+    {
+     "key": "DCPowerPV1",
+     "value": "0",
+     "unit": "W"
+    },
+    {
+     "key": "DCPowerPV2",
+     "value": "0",
+     "unit": "W"
+    },
+    {
+     "key": "TotalDCInputPower",
+     "value": "0.00",
+     "unit": "W"
+    },
+    {
+     "key": "PVDailyPowerGenerationActive",
+     "value": "1.70",
+     "unit": "kWh"
+    },
+    {
+     "key": "ACVoltageRUA",
+     "value": "220.50",
+     "unit": "V"
+    },
+    {
+     "key": "InverterOutputPowerL1L2",
+     "value": "-2720",
+     "unit": "W"
+    },
+    {
+     "key": "GridVoltageL1L2",
+     "value": "220.50",
+     "unit": "V"
+    },
+    {
+     "key": "GridCurrentL1L2",
+     "value": "13.08",
+     "unit": "A"
+    },
+    {
+     "key": "ExternalCTPowerL1L2",
+     "value": "2867",
+     "unit": "W"
+    },
+    {
+     "key": "GridFrequency",
+     "value": "50.01",
+     "unit": "Hz"
+    },
+    {
+     "key": "TotalGridPower",
+     "value": "2861",
+     "unit": "W"
+    },
+    {
+     "key": "DailyEnergyPurchased",
+     "value": "8.00",
+     "unit": "kWh"
+    },
+    {
+     "key": "LoadVoltageL1L2",
+     "value": "224.50",
+     "unit": "V"
+    },
+    {
+     "key": "TotalConsumptionPower",
+     "value": "141",
+     "unit": "W"
+    },
+    {
+     "key": "DailyConsumption",
+     "value": "7.40",
+     "unit": "kWh"
+    },
+    {
+     "key": "BatteryVoltage",
+     "value": "54.41",
+     "unit": "V"
+    },
+    {
+     "key": "BatteryCurrent",
+     "value": "-48.03",
+     "unit": "A"
+    },
+    {
+     "key": "BatteryPower",
+     "value": "-2613",
+     "unit": "W"
+    },
+    {
+     "key": "SOC",
+     "value": "78",
+     "unit": "%"
+    },
+    {
+     "key": "DailyChargingEnergy",
+     "value": "6.50",
+     "unit": "kWh"
+    },
+    {
+     "key": "DailyDischargingEnergy",
+     "value": "4.20",
+     "unit": "kWh"
+    },
+    {
+     "key": "UPSLoadPower",
+     "value": "141",
+     "unit": "W"
+    }
+   ]
+  }
+ ]
+}

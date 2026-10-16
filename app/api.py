@@ -53,9 +53,10 @@ def scheduled_status(snapshot: Snapshot, now: datetime, lang: str) -> Optional[d
     return {"state": state, "start": " / ".join(dict.fromkeys(starts)), "end": " / ".join(dict.fromkeys(ends))}
 
 
-def schedule_payload(collector: SourceCollector, now: datetime) -> dict:
+def schedule_payload(collector: SourceCollector, now: datetime, inverter: Optional[dict] = None) -> dict:
     cfg = collector.config
     payload = {
+        "inverter": inverter,
         "source": cfg.name,
         "parser_type": cfg.name,
         "lang": cfg.lang,
@@ -130,7 +131,10 @@ def create_app(service: Service) -> FastAPI:
 
     @app.get("/api/v1/schedule")
     async def schedule(request: Request, source: Optional[str] = Query(None)):
-        return JSONResponse(schedule_payload(resolve(request, source), now_kyiv()), headers=NO_CACHE)
+        collector, now = resolve(request, source), now_kyiv()
+        monitor = service.inverter
+        inverter = monitor.payload(now) if monitor is not None and monitor.source == collector.name else None
+        return JSONResponse(schedule_payload(collector, now, inverter), headers=NO_CACHE)
 
     @app.get("/api/v1/schedule/today")
     async def schedule_today(request: Request, source: Optional[str] = Query(None)):
@@ -164,10 +168,20 @@ def create_app(service: Service) -> FastAPI:
                 "status": state.status.name if state else None,
                 "since": state.since.isoformat() if state else None,
             }
+        inverter = None
+        if service.inverter is not None:
+            m = service.inverter
+            inverter = {
+                "source": m.source,
+                "last_success": m.last_success.isoformat() if m.last_success else None,
+                "collected_at": m.latest.at.isoformat() if m.latest else None,
+                "failures": m.failures,
+                "last_error": m.last_error or None,
+            }
         problems = service.problems(now)
         ok = not problems
         body = {"status": "ok" if ok else "degraded", "version": APP_VERSION, "problems": problems,
-                "sources": sources, "power": power}
+                "sources": sources, "power": power, "inverter": inverter}
         return JSONResponse(body, status_code=200 if ok else 503)
 
     @app.post("/api/v1/wol")
