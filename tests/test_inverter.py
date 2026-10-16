@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,9 +7,11 @@ from fastapi.testclient import TestClient
 from app.api import create_app
 from app.config import ConfigError, load_settings
 from app.inverter.deye import DeyeError, Fetch, InverterMonitor, InverterReading, parse_device_latest
+from app.notify.router import Router
+from app.power.state import PowerState, PowerStatus
 from app.service import Service
 from app.storage.memory import MemoryStore
-from tests.conftest import BASE_ENV, fixture, kyiv
+from tests.conftest import BASE_ENV, fixture, kyiv, one, snapshot
 
 DEYE_ENV = {
     "DEYE_APP_ID": "202511086802012",
@@ -141,6 +143,54 @@ async def test_building_batteries_ride_on_the_same_fetch():
     # A reading missing from the next answer keeps the last one.
     await monitor.poll(FakeReader(Fetch(main, {"2407244735": replace(water, at=kyiv(2026, 10, 16, 18, 9))})))
     assert [r["stale"] for r in monitor.batteries_payload(kyiv(2026, 10, 16, 18, 10))] == [False, False]
+
+
+def grid_monitor(store, now, env=None):
+    settings = load_settings({**BASE_ENV, **DEYE_ENV, **(env or {})})
+    snap = snapshot([one(date(2026, 10, 16), [18, 19, 20])], source="krem")
+    return InverterMonitor(settings.deye, clock=lambda: now[0], store=store, router=Router(settings),
+                           snapshot=lambda: snap)
+
+
+async def test_grid_loss_and_return_reach_krem_chats():
+    store, now = MemoryStore(), [kyiv(2026, 10, 16, 18, 0)]
+    monitor = grid_monitor(store, now)
+    await monitor.restore()
+    on = replace(parse_device_latest(device(), 100), at=kyiv(2026, 10, 16, 17, 59))
+    await monitor.poll(FakeReader(on))
+    assert store.queued() == []                                     # first sight only initialises
+    off = replace(on, at=kyiv(2026, 10, 16, 18, 1, 12), grid_present=False, grid_v=0.0, soc=88)
+    now[0] = kyiv(2026, 10, 16, 18, 2, 5)
+    await monitor.poll(FakeReader(off))
+    lost = store.queued()
+    assert [m.chat_id for m in lost] == ["222", "333"]
+    assert "СВІТЛО ЗНИКЛО" in lost[0].text and "<b>88%</b>" in lost[0].text
+    # The schedule has power off 18:00-21:00, so this is the scheduled outage and its end is known.
+    assert "За графіком" in lost[0].text and "21:00" in lost[0].text
+    assert "Помічено" not in lost[0].text                           # a minute-old reading is not a late notice
+    assert store.data.power_slots[2] == PowerState(PowerStatus.OFF, off.at) and store.data.power is None
+    now[0] = kyiv(2026, 10, 16, 18, 41)
+    await monitor.poll(FakeReader(replace(off, at=kyiv(2026, 10, 16, 18, 40, 3), grid_present=True, grid_v=229.0)))
+    assert "СВІТЛО З'ЯВИЛОСЯ" in store.queued()[-1].text
+
+
+async def test_grid_change_while_the_service_was_down_says_so():
+    store, now = MemoryStore(), [kyiv(2026, 10, 16, 18, 30)]
+    store.data.power_slots[2] = PowerState(PowerStatus.ON, kyiv(2026, 10, 16, 9))
+    monitor = grid_monitor(store, now)
+    await monitor.restore()
+    off = replace(parse_device_latest(device(), 100), at=kyiv(2026, 10, 16, 18, 29), grid_present=False)
+    await monitor.poll(FakeReader(off))
+    assert "Помічено після перепідключення" in store.queued()[0].text
+
+
+async def test_grid_messages_can_be_switched_off():
+    store, now = MemoryStore(), [kyiv(2026, 10, 16, 18, 30)]
+    store.data.power_slots[2] = PowerState(PowerStatus.ON, kyiv(2026, 10, 16, 9))
+    monitor = grid_monitor(store, now, {"DEYE_NOTIFY_GRID": "false"})
+    await monitor.restore()
+    await monitor.poll(FakeReader(replace(parse_device_latest(device(), 100), grid_present=False)))
+    assert store.queued() == [] and store.data.power_slots[2].status is PowerStatus.OFF
 
 
 def test_deye_settings():

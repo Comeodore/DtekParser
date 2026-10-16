@@ -17,7 +17,8 @@ from app.storage.store import OutboxItem, SourceState
 class _Data:
     sources: dict[str, SourceState] = field(default_factory=dict)
     legacy: dict[int, dict] = field(default_factory=dict)
-    power: Optional[PowerState] = None
+    power: Optional[PowerState] = None     # slot 1
+    power_slots: dict[int, PowerState] = field(default_factory=dict)
     outbox: dict[int, dict] = field(default_factory=dict)
     next_id: int = 1
 
@@ -35,11 +36,14 @@ class MemoryTx:
     async def save_legacy_schedule(self, schedule_id: int, row: dict) -> None:
         self.data.legacy[schedule_id] = copy.deepcopy(row)
 
-    async def load_power_state(self) -> Optional[PowerState]:
-        return self.data.power
+    async def load_power_state(self, slot: int = 1) -> Optional[PowerState]:
+        return self.data.power if slot == 1 else self.data.power_slots.get(slot)
 
-    async def save_power_state(self, state: PowerState) -> None:
-        self.data.power = state
+    async def save_power_state(self, state: PowerState, slot: int = 1) -> None:
+        if slot == 1:
+            self.data.power = state
+        else:
+            self.data.power_slots[slot] = state
 
     async def enqueue(self, messages: Sequence[OutgoingMessage]) -> None:
         now = datetime.now(timezone.utc)

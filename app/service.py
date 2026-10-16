@@ -71,7 +71,13 @@ class Service:
             )
         # Shown in its source's mini app only; deliberately not part of problems():
         # a Deye Cloud hiccup must not pause the heartbeat.
-        self.inverter = InverterMonitor(settings.deye) if settings.deye is not None else None
+        self.inverter: Optional[InverterMonitor] = None
+        if settings.deye is not None:
+            inverter_source = self.collectors[settings.deye.source]
+            self.inverter = InverterMonitor(
+                settings.deye, store=self.store, router=self.router, snapshot=lambda: inverter_source.latest,
+                on_messages=self.outbox.wake,
+            )
         self._tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
@@ -80,6 +86,8 @@ class Service:
             await collector.restore()
         if self.power is not None:
             await self.power.restore()
+        if self.inverter is not None:
+            await self.inverter.restore()
 
         self._spawn("outbox", self.outbox.run)
         for collector in self.collectors.values():

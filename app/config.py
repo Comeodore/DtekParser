@@ -66,6 +66,7 @@ class DeyeConfig:
     base_url: str
     interval: float
     min_grid_voltage: float
+    notify_grid: bool = True    # message the source's chats when the inverter loses or regains the grid
     # Other inverters read in the same call, shown as batteries in another source's mini app.
     batteries: tuple[tuple[str, str], ...] = ()     # (name, device SN)
     batteries_source: Optional[str] = None
@@ -227,6 +228,7 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
             base_url=_get(env, "DEYE_BASE_URL", "https://eu1-developer.deyecloud.com").rstrip("/"),
             interval=float(_get(env, "DEYE_INTERVAL", "60")),
             min_grid_voltage=float(_get(env, "DEYE_MIN_GRID_VOLTAGE", "100")),
+            notify_grid=_bool(env, "DEYE_NOTIFY_GRID", True),
             batteries=batteries,
             batteries_source=batteries_source,
         )

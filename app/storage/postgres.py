@@ -113,19 +113,20 @@ class PgTx:
                 *values,
             )
 
-    async def load_power_state(self) -> Optional[PowerState]:
-        row = await self._conn.fetchrow("SELECT state, timestamp FROM power_events WHERE id = 1 FOR UPDATE")
+    async def load_power_state(self, slot: int = 1) -> Optional[PowerState]:
+        row = await self._conn.fetchrow("SELECT state, timestamp FROM power_events WHERE id = $1 FOR UPDATE", slot)
         if row is None:
             return None
         return PowerState(PowerStatus(row["state"]), row["timestamp"])
 
-    async def save_power_state(self, state: PowerState) -> None:
+    async def save_power_state(self, state: PowerState, slot: int = 1) -> None:
         status = await self._conn.execute(
-            "UPDATE power_events SET state = $1, timestamp = $2 WHERE id = 1", state.status.value, state.since
+            "UPDATE power_events SET state = $1, timestamp = $2 WHERE id = $3", state.status.value, state.since, slot
         )
         if status == "UPDATE 0":
             await self._conn.execute(
-                "INSERT INTO power_events (id, state, timestamp) VALUES (1, $1, $2)", state.status.value, state.since
+                "INSERT INTO power_events (id, state, timestamp) VALUES ($3, $1, $2)",
+                state.status.value, state.since, slot,
             )
 
     async def enqueue(self, messages: Sequence[OutgoingMessage]) -> None:

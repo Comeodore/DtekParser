@@ -22,9 +22,16 @@ from typing import Callable, Optional, Protocol
 import aiohttp
 
 from app.config import DeyeConfig
+from app.dtek.models import Snapshot
+from app.notify.router import Router
+from app.power.state import PowerState, PowerStatus, next_state
+from app.storage.store import Store
 from app.timeutil import KYIV_TZ, now_kyiv
 
 logger = logging.getLogger(__name__)
+
+# power_events row holding this inverter's grid state (row 1 is the home HA power state).
+GRID_SLOT = 2
 
 
 class DeyeError(Exception):
@@ -195,10 +202,25 @@ class InverterMonitor:
     MAX_RETRIES = 1
     MIN_WAIT_S = 5.0
 
-    def __init__(self, config: DeyeConfig, clock: Callable[[], datetime] = now_kyiv):
+    def __init__(
+        self,
+        config: DeyeConfig,
+        clock: Callable[[], datetime] = now_kyiv,
+        store: Optional[Store] = None,
+        router: Optional[Router] = None,
+        snapshot: Callable[[], Optional[Snapshot]] = lambda: None,
+        on_messages: Optional[Callable[[], None]] = None,
+    ):
         self.config = config
         self.source = config.source
         self._clock = clock
+        # Grid lost/back messages for the source's chats; off without a store (tests of polling alone).
+        self._store = store
+        self._router = router
+        self._snapshot = snapshot
+        self._on_messages = on_messages
+        self._grid: Optional[PowerState] = None
+        self._grid_seen = False
         self.latest: Optional[InverterReading] = None
         self.batteries: dict[str, InverterReading] = {}     # by DEYE_BATTERIES name
         self.last_success: Optional[datetime] = None
@@ -262,13 +284,11 @@ class InverterMonitor:
             gap = (reading.at - self.latest.at).total_seconds()
             if 20 <= gap <= 900:
                 self._gaps.append(gap)
-        if self.latest is not None and reading.grid_present != self.latest.grid_present:
-            logger.info(f"Deye: grid {'back' if reading.grid_present else 'lost'} at {self.source} "
-                        f"({reading.grid_v} V at {reading.at:%H:%M})")
         if self.failures:
             logger.info(f"Deye fetch recovered after {self.failures} failures")
         now = self._clock()
-        if self.latest is None or reading.at > self.latest.at:
+        fresh = self.latest is None or reading.at > self.latest.at
+        if fresh:
             self.readings += 1
             self.last_lag_s = round((now - reading.at).total_seconds())
             self._misses = 0
@@ -279,7 +299,51 @@ class InverterMonitor:
         self.last_success = now
         self.last_error = ""
         self.failures = 0
+        if fresh and self._store is not None:
+            try:
+                await self._follow_grid(reading, now)
+            except Exception as e:
+                # Not saved means not judged: the next reading compares against the stored state again.
+                logger.warning(f"Deye grid state not saved: {type(e).__name__}: {e}")
         return self.next_wait(self.last_success)
+
+    async def restore(self) -> None:
+        if self._store is None:
+            return
+        async with self._store.transaction() as tx:
+            self._grid = await tx.load_power_state(GRID_SLOT)
+        if self._grid:
+            logger.info(f"Deye grid state from DB: {self._grid.status.name} since {self._grid.since.astimezone(KYIV_TZ)}")
+
+    async def _follow_grid(self, reading: InverterReading, now: datetime) -> None:
+        """Message the source's chats when the inverter loses or regains the grid, with schedule context."""
+        status = PowerStatus.ON if reading.grid_present else PowerStatus.OFF
+        first = not self._grid_seen
+        if self._grid is not None and status == self._grid.status:
+            self._grid_seen = True
+            return
+        battery = f"{round(reading.soc)}%" if reading.soc is not None else "N/A"
+        async with self._store.transaction() as tx:
+            stored = await tx.load_power_state(GRID_SLOT)
+            # A reading is always about a minute old, which is not a late notice, so it is judged at its
+            # own time. Only the first one after a start may show a change made while the service was down.
+            state, transition = next_state(stored, status, reading.at, reading.at, battery, from_snapshot=first)
+            if state != stored:
+                await tx.save_power_state(state, GRID_SLOT)
+            messages = []
+            if transition is not None and self.config.notify_grid and self._router is not None:
+                messages = self._router.for_grid(self.source, transition, self._snapshot(), now)
+            await tx.enqueue(messages)
+        self._grid = state
+        self._grid_seen = True
+        if transition is None:
+            logger.info(f"Deye grid state initialised: {state.status.name}")
+            return
+        logger.info(f"Deye: grid {'back' if transition.status is PowerStatus.ON else 'lost'} at {self.source} "
+                    f"at {transition.at.astimezone(KYIV_TZ):%H:%M:%S} ({reading.grid_v} V)"
+                    f"{' (noticed after a restart)' if transition.detected_late else ''}")
+        if messages and self._on_messages:
+            self._on_messages()
 
     def payload(self, now: datetime) -> Optional[dict]:
         return self.latest.to_dict(now, self.STALE_S) if self.latest else None

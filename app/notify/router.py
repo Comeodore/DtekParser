@@ -67,5 +67,10 @@ class Router:
     def for_power(self, transition: PowerTransition, snapshot: Optional[Snapshot],
                   now: datetime) -> list[OutgoingMessage]:
         assert self._settings.power is not None
-        source = self._settings.source(self._settings.power.source)
+        return self.for_grid(self._settings.power.source, transition, snapshot, now)
+
+    def for_grid(self, source_name: str, transition: PowerTransition, snapshot: Optional[Snapshot],
+                 now: datetime) -> list[OutgoingMessage]:
+        """Power lost or back at a source's address, however it was noticed (HA voltage, Deye grid)."""
+        source = self._settings.source(source_name)
         return self._fan_out(source, render_power(transition, snapshot, now, source.lang), now)

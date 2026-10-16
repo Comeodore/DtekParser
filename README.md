@@ -13,8 +13,13 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
 - **Power.** It watches the Victron AC-input voltage in Home Assistant and
   reports outages and restores to the kem chats, with schedule context.
 - **Inverter (krem).** It reads the Deye inverter in Круглик from Deye Cloud
-  (`device/latest`) and shows grid, battery, consumption and solar in the krem
-  mini app. The logger uploads every ~72 s and Deye has no push, so polls are
+  (`device/latest`) and shows in the krem mini app where the house's power
+  comes from: the house in the middle, sun, grid and battery around it, the
+  links coloured and arrowed by what flows where. When the inverter loses or
+  regains the grid it messages the krem chats the way the Victron does for
+  kem: duration, battery, and whether the schedule has power off now (with
+  its end) or the outage is unscheduled (`DEYE_NOTIFY_GRID`; state in
+  `power_events` row 2). The logger uploads every ~72 s and Deye has no push, so polls are
   timed to land just after the next reading reaches the cloud (`/health`
   shows the cadence, the lag and the calls per reading). Settings are
   `DEYE_*`; `tools/deye_probe.py` lists the stations and measures the
