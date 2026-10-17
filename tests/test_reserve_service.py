@@ -7,8 +7,9 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from deye_reserve.config import ConfigError, load_config
 from deye_reserve.deye import parse_tou, tou_request
-from deye_reserve.inputs import InputError, parse_schedule, schedule_changed
+from deye_reserve.inputs import InputError, changed_days, parse_schedule
 from deye_reserve.planner import Params, Slot, safe_table
+from deye_reserve.review import actual, decisions
 from deye_reserve.service import ReserveService
 from deye_reserve.web import make_app
 from deye_reserve.timeutil import KYIV_TZ
@@ -78,26 +79,30 @@ def test_another_group_takes_every_line():
 
 
 def test_only_real_schedule_changes_count():
+    today = date(2026, 10, 17)
     days = parse_schedule(SCHEDULE, "GPV2.2", T(17, 15, 30), MAX_AGE).days
     sent = {d.isoformat(): list(s) for d, s in days.items()}
-    assert not schedule_changed(sent, days, date(2026, 10, 17))
+    assert changed_days(None, days, today) == [today]
+    assert changed_days(sent, days, today) == []
     later = parse_schedule(with_tomorrow(SCHEDULE, {9, 10}), "GPV2.2", T(17, 15, 30), MAX_AGE).days
-    assert schedule_changed(sent, later, date(2026, 10, 17))
-    # Midnight: yesterday leaving is not a change.
-    assert not schedule_changed({"2026-10-16": ["power_off"] * 24, **sent}, days, date(2026, 10, 17))
+    assert changed_days(sent, later, today) == [date(2026, 10, 18)]
+    # Tomorrow's outages withdrawn is news; yesterday leaving at midnight is not.
+    assert changed_days({d.isoformat(): list(s) for d, s in later.items()}, days, today) == [date(2026, 10, 18)]
+    assert changed_days({"2026-10-16": ["power_off"] * 24, **sent}, days, today) == []
 
 
 # ---- the service, with fakes at the edges ----
 
 class Sources:
     def __init__(self, clock):
-        self.payload = copy.deepcopy(SCHEDULE)
+        self.payload = {k: v for k, v in copy.deepcopy(SCHEDULE).items() if k != "updated_at"}
         self.reading = {"soc": 82.0, "grid_present": True}      # taken a minute ago unless "at" is given
         self.weather_ok = True
         self._clock = clock
 
     async def schedule(self):
-        return self.payload
+        # dtek-service fetches every minute; a test that wants it stale says so.
+        return {"updated_at": (self._clock() - timedelta(minutes=1)).isoformat(), **self.payload}
 
     async def inverter(self):
         return {"source": "krem", "reading": {"at": (self._clock() - timedelta(minutes=1)).isoformat(), **self.reading}}
@@ -173,18 +178,24 @@ async def test_plan_is_sent_once_and_again_when_the_schedule_changes(make):
     await ready(service, clock["now"])
     report = await service.replan(clock["now"], "test")
     assert report.fallback is None and report.plan.safe
-    assert len(service.messenger.texts) == 1
-    text = service.messenger.texts[0]
-    assert "План батареї на ніч" in text and "сьогодні 17.10: 00:00–01:00, 15:00–17:00" in text
-    assert "завтра 18.10: ще не опубліковано" in text and "Лише рекомендація" in text
-    assert "Графік на завтра ще не опубліковано" in text
+    # Only the final table, for the day whose schedule is news.
+    assert service.messenger.texts == [
+        "🔋 <b>Таблиця TOU на сьогодні, 17.10</b>\n<pre>" + "\n".join(
+            f"{s.time}  {s.soc:>3}%{'  ⚡ заряд від мережі' if s.grid_charge else ''}" for s in report.table)
+        + "</pre>\nℹ️ Лише рекомендація: запис вимкнено"]
     clock["now"] += timedelta(minutes=30)
     await service.replan(clock["now"], "hourly")
-    assert len(service.messenger.texts) == 1                         # nothing changed: quiet
+    assert len(service.messenger.texts) == 1                         # the schedule did not change: quiet
     service.sources.payload = with_tomorrow(service.sources.payload, {9, 10, 11})
     clock["now"] += timedelta(minutes=5)
     await service.replan(clock["now"], "schedule")
-    assert len(service.messenger.texts) == 2 and "завтра 18.10: 09:00–12:00" in service.messenger.texts[1]
+    assert len(service.messenger.texts) == 2
+    assert service.messenger.texts[1].startswith("🔋 <b>Таблиця TOU на завтра, 18.10</b>")
+    kinds = [r["kind"] for r in service.journal.read()]
+    assert kinds == ["replan", "message", "replan", "replan", "message"]
+    last = [r for r in service.journal.read() if r["kind"] == "replan"][-1]
+    assert last["tomorrow_published"] and last["night"] == report.plan.night or last["night"] >= 45
+    assert set(last["candidates"]) >= {"45", "95"} and last["expected"]["min_by"]
 
 
 async def test_no_forecast_means_the_safe_table(make):
@@ -193,7 +204,7 @@ async def test_no_forecast_means_the_safe_table(make):
     await ready(service, clock["now"])
     report = await service.replan(clock["now"], "test")
     assert report.table == safe_table(service.p) and report.fallback == "немає прогнозу сонця"
-    assert "безпечна таблиця 90/45" in service.messenger.texts[0]
+    assert "⚠️ Безпечна таблиця 90/45: немає прогнозу сонця" in service.messenger.texts[0]
 
 
 async def test_stale_inverter_reading_means_the_safe_table(make):
@@ -208,8 +219,7 @@ async def test_recommendations_never_write(make):
     service, clock = make()
     await ready(service, clock["now"])
     await service.replan(clock["now"], "test")
-    assert not service.cfg.write and service.deye.updates == []
-    assert "У інверторі зараз:" in service.messenger.texts[0]
+    assert not service.cfg.write and service.deye.updates == [] and service.deye.calls == 0
 
 
 def test_write_request():
@@ -242,14 +252,16 @@ async def test_write_waits_for_the_inverter_and_the_cloud(make):
     await ready(service, clock["now"])
     service.deye.statuses = [100, 300, 666]
     report = await service.replan(clock["now"], "test")
-    assert "Записую в інвертор" in service.messenger.texts[0]
-    await next(iter(service._tasks))
     assert len(service.deye.updates) == 1 and service.deye.updates[0]["deviceSn"] == "2511090098"
-    assert service.messenger.texts[-1].startswith("✅ <b>Таблицю TOU записано</b>")
+    # One message, once the cloud shows the new table.
+    assert len(service.messenger.texts) == 1 and service.messenger.texts[0].endswith("✅ Записано в інвертор")
     assert service.state.written_table == [[s.start, s.soc, s.grid_charge] for s in report.table]
     assert service.state.writes_on(date(2026, 10, 17)) == 1
-    await service.replan(clock["now"] + timedelta(hours=1), "hourly")
-    assert len(service.deye.updates) == 1                            # already there: no second write
+    clock["now"] += timedelta(hours=1)
+    await service.replan(clock["now"], "hourly")
+    assert len(service.deye.updates) == 1 and len(service.messenger.texts) == 1     # already there, nothing to say
+    writes = [r for r in service.journal.read() if r["kind"] == "write"]
+    assert [(w["ok"], w["order"]) for w in writes] == [(True, "9001")]
 
 
 async def test_failed_write_is_an_alarm(make):
@@ -263,10 +275,14 @@ async def test_failed_write_is_an_alarm(make):
         return {**result, "error": "530"} if result["status"] == 500 else result
     service.deye.order = failing
     await service.replan(clock["now"], "test")
-    await next(iter(service._tasks))
-    assert service.messenger.texts[-1].startswith("🚨 <b>Запис TOU не вдався</b>")
-    assert "інвертор не виконав команду" in service.messenger.texts[-1]
+    assert "🚨 Не вдалося записати: команда 9001: статус 500, інвертор не виконав команду" in service.messenger.texts[-1]
     assert service.write_blocker(service.report, clock["now"]).startswith("після помилки чекаю")
+    # Later, with no schedule news, a failed write is an alarm of its own.
+    service.deye.statuses = [500]
+    clock["now"] += timedelta(minutes=31)
+    await service.replan(clock["now"], "hourly")
+    assert service.messenger.texts[-1].startswith("🚨 <b>Запис TOU не вдався</b>")
+    assert len(service.deye.updates) == 2
 
 
 async def test_write_guards(make):
@@ -274,7 +290,7 @@ async def test_write_guards(make):
     await ready(service, clock["now"])
     service.sources.reading = {**service.sources.reading, "grid_present": False}
     await service.replan(clock["now"], "test")
-    assert service.deye.updates == [] and "Поки не записую: немає мережі" in service.messenger.texts[0]
+    assert service.deye.updates == [] and service.messenger.texts[0].endswith("⏸ Запишу, щойно буде можна: немає мережі")
     report = service.report
     report.grid_present = True
     assert service.write_blocker(report, T(17, 16)) == "триває відключення за графіком"
@@ -304,6 +320,18 @@ async def test_events_replan_once_when_due(make):
     assert service.last_replan == first                               # still settling
     await service.tick(T(17, 14, 18, 30))
     assert service.last_replan == T(17, 14, 18, 30) and service.event_due is None
+
+
+async def test_a_settling_batch_holds_the_hourly_replan(make):
+    # 17.10: the hourly replan ran 4 s after a webhook and beat the batch it was waiting for.
+    service, clock = make(now=T(17, 15, 33, 48))
+    await ready(service, clock["now"])
+    await service.tick(clock["now"])
+    service.on_event("schedule", T(17, 16, 33, 44))
+    await service.tick(T(17, 16, 33, 48))                             # the hour is up, but a batch is settling
+    assert service.last_replan == T(17, 15, 33, 48)
+    await service.tick(T(17, 16, 36, 14))
+    assert service.last_replan == T(17, 16, 36, 14)
 
 
 async def test_poll_catches_a_lost_webhook(make):
@@ -348,3 +376,21 @@ def test_config_defaults_and_checks():
         load_config({**ENV, "DEYE_RESERVE_DAY_FLOOR": "15"})
     with pytest.raises(ConfigError, match="boolean"):
         load_config({**ENV, "DEYE_RESERVE_WRITE": "maybe"})
+
+
+async def test_review_lines_up_decisions_with_the_day(make):
+    service, clock = make(now=T(17, 18), DEYE_RESERVE_WRITE="true")
+    await ready(service, clock["now"])
+    await service.replan(clock["now"], "події: schedule")
+    lines = decisions(service.journal.read())
+    replan = next(line for line in lines if " REPLAN " in line)
+    assert replan.startswith("17.10 18:00 REPLAN (події: schedule) soc 82.0 grid True night")
+    assert "outages 17.10 00:00-01:00, 17.10 15:00-17:00; tomorrow published False" in replan
+    assert any(line.startswith("17.10 18:0") and " WRITE ok order 9001" in line for line in lines)
+    assert any("MESSAGE day 2026-10-17 (written)" in line for line in lines)
+    # 16.10 as Deye recorded it, with that day's real outages.
+    history = fixture("deye_history_power_20261009_17.json")["stationDataItems"]
+    day = actual(history, T(16, 7), T(17, 7), [(T(16, 9, 5), T(16, 15)), (T(16, 18, 23), T(16, 22, 27))], Params())
+    assert day[0] == "SOC: start 32%, lowest 19% at 16.10 11:45, 23:00 90%, end 90%"
+    assert day[1].startswith("grid bought: day ") and not day[1].startswith("grid bought: day 0.00 kWh, night 0.00")
+    assert day[2].startswith("outage 16.10 09:05-15:00: SOC ") and day[3].startswith("outage 16.10 18:23-22:27")

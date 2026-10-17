@@ -47,14 +47,18 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   loses or regains the grid (`DEYE_RESERVE_URL`, `/api/v1/inverter/latest`
   gives it SOC and grid); it replans 2.5 min after such an event (batches),
   polls the schedule every 10 min as a fallback, replans hourly and after
-  the 05:30 and 22:00 forecast refresh. The plan goes to the owner's own
-  chat (`DEYE_RESERVE_CHAT_ID`) through the krem bot, only when the table,
-  its status or the schedule changes. Writing to the inverter
-  (`/order/sys/tou/update`, then waiting for the order and for
-  `/config/tou` to show the table) exists but is off: it needs
-  `DEYE_RESERVE_WRITE=true`, and then writes only a changed table, with the
-  grid present, outside an outage, at most 6 times a day, one command at a
-  time. `GET 127.0.0.1:9997/plan` shows the current plan, `/health` the loop.
+  the 05:30 and 22:00 forecast refresh. The owner's own chat
+  (`DEYE_RESERVE_CHAT_ID`, through the krem bot) hears about it
+  only for a day whose DTEK schedule was published or changed: that day's
+  final table and whether it is in the inverter (plus an alarm when a
+  write fails). With `DEYE_RESERVE_WRITE=true` each replan writes a changed
+  table (`/order/sys/tou/update`, then waiting for the order and for
+  `/config/tou` to show it), only with the grid present, outside an outage,
+  at most 6 times a day, one command at a time. Every replan, write and
+  message goes to `reserve-data/journal.jsonl` with what it was based on;
+  `docker exec deye-reserve python -m deye_reserve.review` lines a day's
+  decisions up with what Deye recorded. `GET 127.0.0.1:9997/plan` shows
+  the current plan, `/health` the loop.
 - **Mini app and API.** Each source's port serves its Telegram mini app and
   `/api/v1/*`: kem on 9999, krem on 9998.
 - **Wake-on-LAN.** `POST /api/v1/wol` is kept for HA's

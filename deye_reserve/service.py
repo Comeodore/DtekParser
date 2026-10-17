@@ -8,8 +8,11 @@ Replans happen
   new DTEK "last updated" stamp the webhook did not deliver;
 - every hour, and after each forecast refresh (05:30 and 22:00).
 
-A message goes out when the table, the plan's status or the schedule changes;
-a replan that changes nothing stays quiet.
+With DEYE_RESERVE_WRITE=true each replan also gets the table into the
+inverter when it differs. The owner hears only about a day whose DTEK
+schedule was published or changed: that day's final table and whether it
+is in the inverter; and about a write that failed. The reasons behind every
+decision go to the journal (data/journal.jsonl), for the daily review.
 """
 from __future__ import annotations
 
@@ -21,9 +24,10 @@ from typing import Optional, Protocol
 
 from deye_reserve.config import Config
 from deye_reserve.deye import ORDER_DONE, ORDER_ERRORS, ORDER_FINAL, DeyeError, DeyeRateLimited, tou_request
-from deye_reserve.inputs import (Forecast, InputError, LoadProfile, Schedule, combine_forecast, load_profile,
-                                 parse_schedule, schedule_changed)
-from deye_reserve.messages import Report, render_plan, render_write, table_line
+from deye_reserve.inputs import (Forecast, InputError, LoadProfile, Schedule, changed_days, combine_forecast,
+                                 load_profile, parse_schedule)
+from deye_reserve.journal import Journal
+from deye_reserve.messages import Report, render_alarm, render_day, table_line
 from deye_reserve.planner import Inputs, Planner, Table, local, safe_table, window
 from deye_reserve.state import load_state, read_json, save_state, table_from_list, table_to_list, write_json
 from deye_reserve.timeutil import KYIV_TZ, now_kyiv
@@ -75,6 +79,8 @@ class ReserveService:
         self._sleep = sleep
         self._state_path = config.data_dir / "state.json"
         self.state = load_state(self._state_path)
+        self.journal = Journal(config.data_dir / "journal.jsonl")
+        self.journal.prune(clock())
         self.forecast: Optional[Forecast] = None
         self.load: Optional[LoadProfile] = None
         self._load_caches()
@@ -94,7 +100,6 @@ class ReserveService:
         self._tou_cache: Optional[tuple[datetime, Table]] = None
         self._write_lock = asyncio.Lock()
         self._write_blocked_until: Optional[datetime] = None
-        self._tasks: set[asyncio.Task] = set()
 
     # ---- caches ----
 
@@ -181,9 +186,11 @@ class ReserveService:
             self._next_poll = now + timedelta(seconds=self.cfg.poll_s)
             await self.poll_schedule(now)
         reason = None
-        if self.event_due is not None and now >= self.event_due:
-            reason = "події: " + ", ".join(dict.fromkeys(self._events))
-            self._events, self._first_event, self.event_due = [], None, None
+        if self.event_due is not None:
+            # A batch is settling: the replan it brings covers the hourly one and a new forecast too.
+            if now >= self.event_due:
+                reason = "події: " + ", ".join(dict.fromkeys(self._events))
+                self._events, self._first_event, self.event_due = [], None, None
         elif self._forecast_new:
             reason = "новий прогноз"
         elif now >= self._next_replan:
@@ -294,40 +301,65 @@ class ReserveService:
         if report.grid_present is False and schedule is not None and \
                 not any(a <= now < b for a, b in schedule.outages):
             report.notes.append("Мережі немає поза графіком")
+        changed = table_to_list(report.table) != self.state.previous_table
         self.state.previous_table = table_to_list(report.table)
         self.report, self.last_replan = report, now
-        await self._tell(report, schedule, now)
-        if self.cfg.write:
-            await self._maybe_write(report, now)
+        logger.info(f"plan {'changed' if changed else 'unchanged'}: {table_line(report.table)}"
+                    + (f" (fallback: {report.fallback})" if report.fallback else ""))
+        outcome = await self._apply(report, now) if self.cfg.write else ("off", "")
+        self._journal_replan(report, reason, outcome)
+        await self._tell(report, schedule, now, outcome)
         self._save()
         return report
 
-    def _status(self, report: Report) -> str:
-        if report.fallback:
-            return "fallback"
-        return "plan" if report.plan.safe else "unsafe"
-
-    async def _tell(self, report: Report, schedule: Optional[Schedule], now: datetime) -> None:
+    async def _tell(self, report: Report, schedule: Optional[Schedule], now: datetime,
+                    outcome: tuple[str, str]) -> None:
+        """A day whose schedule was published or changed gets its final table; a failed write an alarm."""
         today = local(now).date()
-        changed = (table_to_list(report.table) != self.state.sent_table or self._status(report) != self.state.sent_status
-                   or (schedule is not None and schedule_changed(self.state.sent_schedule, schedule.days, today)))
-        if not changed:
-            logger.info(f"plan unchanged: {table_line(report.table)}")
-            return
-        report.inverter_table = await self.inverter_table(now)
-        if not self.cfg.write:
-            report.write_note = "ℹ️ Лише рекомендація: запис в інвертор вимкнено."
-        elif report.inverter_table is not None and tuple(report.inverter_table) == tuple(report.table):
-            report.write_note = ""
-        else:
-            blocker = self.write_blocker(report, now)
-            report.write_note = "✍️ Записую в інвертор…" if blocker is None else f"⏸ Поки не записую: {blocker}."
-        logger.info(f"plan changed: {table_line(report.table)} ({self._status(report)})")
-        if await self.messenger.send(render_plan(report, self.p)):
-            self.state.sent_table = table_to_list(report.table)
-            self.state.sent_status = self._status(report)
-            if schedule is not None:
+        days = changed_days(self.state.sent_schedule, schedule.days, today) if schedule is not None else []
+        if days:
+            day = max(days)         # tomorrow's publication is the news when both changed
+            if await self.messenger.send(render_day(day, today, report, outcome)):
                 self.state.sent_schedule = {d.isoformat(): list(s) for d, s in schedule.days.items()}
+                self.state.sent_table = table_to_list(report.table)
+                self.journal.add("message", now, day=day.isoformat(), outcome=outcome[0])
+        elif outcome[0] == "failed":
+            await self.messenger.send(render_alarm(report.table, outcome[1]))
+            self.journal.add("message", now, day=None, outcome="failed")
+
+    def _journal_replan(self, report: Report, reason: str, outcome: tuple[str, str]) -> None:
+        now = report.now
+        today = local(now).date()
+        row = {"reason": reason, "fallback": report.fallback, "soc": report.soc, "grid": report.grid_present,
+               "table": table_to_list(report.table), "outcome": list(outcome), "notes": report.notes}
+        if report.schedule is not None:
+            row.update(outages=[[a.isoformat(), b.isoformat()] for a, b in report.schedule.outages],
+                       tomorrow_published=report.schedule.tomorrow_published, stamp=report.schedule.updated)
+        if self.forecast is not None:
+            row["forecast"] = {d.isoformat(): [round(self.forecast.total_kwh(d), 2),
+                                               round(self.forecast.total_kwh(d, True), 2)]
+                               for d in (today, today + timedelta(days=1))}
+            row["forecast_at"] = self.forecast.fetched_at.isoformat()
+        if self.load is not None:
+            row["load_kwh"] = [round(sum(self.load.mean.values()) / 1000, 2),
+                               round(sum(max(v, self.load.mean.get(h, 0)) for h, v in self.load.p80.items())
+                                     * self.p.safety_load_factor / 1000, 2)]
+        if report.plan is not None:
+            p = report.plan
+
+            def sim(s):
+                return {"buy_day": round(s.buy_day, 2), "buy_night": round(s.buy_night, 2),
+                        "cost_adj": round(s.cost_adj, 2), "curtailed": round(s.curtailed, 2),
+                        "soc_end": round(s.soc_end, 1), "unserved": round(s.unserved, 2),
+                        "min_by": {p.outages[k][0].isoformat(): round(v, 1) for k, v in s.min_by.items()}}
+            row.update(night=p.night, safe=p.safe, kept_previous=p.kept_previous, calibration=p.calibration,
+                       window=[p.start.isoformat(), p.end.isoformat()], expected=sim(p.expected),
+                       pessimistic=sim(p.pessimistic),
+                       baseline_cost_adj=round(p.baseline.expected.cost_adj, 2) if p.baseline else None,
+                       candidates={n: [s, round(c, 2), round(lo, 1)] for n, (s, c, lo) in p.candidates.items()},
+                       soc_expected={local(t).strftime("%d.%m %H:%M"): round(v, 1)
+                                     for t, v in p.expected.soc_at.items()})
+        self.journal.add("replan", now, **row)
 
     async def device_sn(self) -> str:
         if self.cfg.device_sn:
@@ -366,26 +398,26 @@ class ReserveService:
             return f"вже {self.cfg.max_writes_per_day} записів сьогодні"
         return None
 
-    async def _maybe_write(self, report: Report, now: datetime) -> None:
-        if table_to_list(report.table) == self.state.written_table:
-            return
+    async def _apply(self, report: Report, now: datetime) -> tuple[str, str]:
+        """Gets the table into the inverter: ("already" | "written" | "blocked" | "failed", detail)."""
         current = await self.inverter_table(now)
+        if current is None and table_to_list(report.table) == self.state.written_table:
+            return "already", ""
         if current is not None and tuple(current) == tuple(report.table):
             self.state.written_table = table_to_list(report.table)
-            return
+            return "already", ""
         blocker = self.write_blocker(report, now)
         if blocker is not None:
             logger.info(f"not writing {table_line(report.table)}: {blocker}")
-            return
+            return "blocked", blocker
         self.state.count_write(local(now).date())
-        task = asyncio.create_task(self.write(report.table))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        ok, detail = await self.write(report.table)
+        return ("written", "") if ok else ("failed", detail)
 
-    async def write(self, table: Table) -> bool:
+    async def write(self, table: Table) -> tuple[bool, str]:
         """One command: send, wait for the inverter, then for the cloud to show the new table."""
         async with self._write_lock:
-            ok, detail = False, ""
+            ok, detail, order_id = False, "", None
             try:
                 sn = await self.device_sn()
                 order_id = await self.deye.update_tou(tou_request(sn, table, self.p.slot_power_w))
@@ -414,9 +446,9 @@ class ReserveService:
             else:
                 self._write_blocked_until = now + self.WRITE_BACKOFF
                 logger.error(f"TOU write failed: {detail}")
+            self.journal.add("write", now, table=table_to_list(table), ok=ok, detail=detail, order=order_id)
             self._save()
-            await self.messenger.send(render_write(ok, detail, table))
-            return ok
+            return ok, detail
 
     async def _wait_order(self, order_id: str) -> Optional[dict]:
         waited = 0.0

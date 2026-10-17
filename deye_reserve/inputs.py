@@ -96,15 +96,14 @@ def parse_schedule(payload: dict, group: str, now: datetime, max_age: timedelta)
     return Schedule(tuple(outages), by_date, published, payload.get("schedule_updated") or "", found)
 
 
-def schedule_changed(old: Optional[dict[str, list[str]]], new: dict[date, tuple[str, ...]], today: date) -> bool:
-    """A day from today on that appeared with outages or changed; days left behind do not count."""
+def changed_days(old: Optional[dict[str, list[str]]], new: dict[date, tuple[str, ...]], today: date) -> list[date]:
+    """Days from today on whose outages appeared, changed or were withdrawn; days left behind do not count."""
     old = old or {}
-    for d, slots in new.items():
-        if d < today:
-            continue
-        if list(slots) != old.get(d.isoformat(), ["power_on"] * 24):
-            return True
-    return any(date.fromisoformat(d) >= today and date.fromisoformat(d) not in new for d in old)
+    quiet = ["power_on"] * 24
+    days = {d for d, slots in new.items() if d >= today and list(slots) != old.get(d.isoformat(), quiet)}
+    days |= {date.fromisoformat(d) for d in old if date.fromisoformat(d) >= today and date.fromisoformat(d) not in new
+             and old[d] != quiet}
+    return sorted(days)
 
 
 # ---- Sun (Open-Meteo) ----
