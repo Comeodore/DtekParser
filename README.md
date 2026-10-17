@@ -53,11 +53,13 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   the 05:30 and 22:00 forecast refresh. The owner's own chat
   (`DEYE_RESERVE_CHAT_ID`, through the krem bot) hears about it
   only for a day whose DTEK schedule was published or changed: that day's
-  final table and whether it is in the inverter (plus an alarm when a
-  write fails). With `DEYE_RESERVE_WRITE=true` each replan writes a changed
-  table (`/order/sys/tou/update`, then waiting for the order and for
-  `/config/tou` to show it), only with the grid present, outside an outage,
-  at most 6 times a day, one command at a time. Every replan, write and
+  final table, sent once it is in the inverter (a line is added only when
+  it is not), plus an alarm when a write fails. With
+  `DEYE_RESERVE_WRITE=true` each replan writes a changed table straight
+  away (`/order/sys/tou/update`, then waiting for the order and for
+  `/config/tou` to show it), outage or not: the logger runs on the battery,
+  so it only needs a fresh reading. At most 6 times a day, one command at
+  a time. Every replan, write and
   message goes to `reserve-data/journal.jsonl` with what it was based on;
   `docker exec deye-reserve python -m deye_reserve.review` lines a day's
   decisions up with what Deye recorded. `GET 127.0.0.1:9997/plan` shows

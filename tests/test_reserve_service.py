@@ -257,7 +257,7 @@ async def test_write_waits_for_the_inverter_and_the_cloud(make):
     report = await service.replan(clock["now"], "test")
     assert len(service.deye.updates) == 1 and service.deye.updates[0]["deviceSn"] == "2511090098"
     # One message, once the cloud shows the new table.
-    assert len(service.messenger.texts) == 1 and service.messenger.texts[0].endswith("✅ Записано в інвертор")
+    assert len(service.messenger.texts) == 1 and service.messenger.texts[0].endswith("</pre>")    # sent = written
     assert service.state.written_table == [[s.start, s.soc, s.grid_charge] for s in report.table]
     assert service.state.writes_on(date(2026, 10, 17)) == 1
     clock["now"] += timedelta(hours=1)
@@ -288,15 +288,26 @@ async def test_failed_write_is_an_alarm(make):
     assert len(service.deye.updates) == 2
 
 
-async def test_write_guards(make):
-    service, clock = make(now=T(17, 18), DEYE_RESERVE_WRITE="true")
+async def test_writes_go_straight_in_even_during_an_outage(make):
+    # 16:00, inside the 15:00-17:00 outage with the grid gone: the logger is on the battery and takes it.
+    service, clock = make(now=T(17, 16), DEYE_RESERVE_WRITE="true")
     await ready(service, clock["now"])
     service.sources.reading = {**service.sources.reading, "grid_present": False}
     await service.replan(clock["now"], "test")
-    assert service.deye.updates == [] and service.messenger.texts[0].endswith("⏸ Запишу, щойно буде можна: немає мережі")
+    assert len(service.deye.updates) == 1 and service.messenger.texts[0].endswith("</pre>")
+
+
+async def test_write_guards(make):
+    service, clock = make(now=T(17, 18), DEYE_RESERVE_WRITE="true")
+    await ready(service, clock["now"])
+    service.sources.reading = {**service.sources.reading, "at": "2026-10-17T17:30:00+03:00"}     # logger silent
+    service.deye.tou = safe_table(service.p, night=65)          # so the safe 90/45 would need writing
+    await service.replan(clock["now"], "test")
+    assert service.deye.updates == []
+    assert service.messenger.texts[0].endswith("⏸ Запишу, щойно буде можна: інвертор не на зв&#x27;язку")
     report = service.report
-    report.grid_present = True
-    assert service.write_blocker(report, T(17, 16)) == "триває відключення за графіком"
+    report.reading_fresh = True
+    assert service.write_blocker(report, T(17, 18)) is None
     service.state.writes = {"2026-10-17": 6}
     assert service.write_blocker(report, T(17, 18)) == "вже 6 записів сьогодні"
     assert service.write_blocker(report, T(18, 9)) is None

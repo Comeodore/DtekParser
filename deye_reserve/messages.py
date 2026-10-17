@@ -21,6 +21,7 @@ class Report:
     forecast: Optional[Forecast] = None
     soc: Optional[float] = None
     grid_present: Optional[bool] = None
+    reading_fresh: bool = False             # the inverter's logger is online
     notes: list[str] = field(default_factory=list)
 
 
@@ -41,23 +42,25 @@ def day_title(day: date, today: date) -> str:
     return f"на {day:%d.%m}"
 
 
+# A table in the chat is a table in the inverter: only the other cases get a line.
 OUTCOME = {
     "off": "ℹ️ Лише рекомендація: запис вимкнено",
-    "already": "✅ Уже в інверторі",
-    "written": "✅ Записано в інвертор",
+    "already": "",
+    "written": "",
     "blocked": "⏸ Запишу, щойно буде можна: {}",
     "failed": "🚨 Не вдалося записати: {}",
 }
 
 
 def render_day(day: date, today: date, report: Report, outcome: tuple[str, str]) -> str:
-    """Only the final table of the day whose schedule came out, and whether it is in the inverter."""
+    """Only the final table of the day whose schedule came out; a line only when it is not in the inverter."""
     lines = [f"🔋 <b>Таблиця TOU {day_title(day, today)}</b>"]
     if report.fallback:
         lines.append(f"⚠️ Безпечна таблиця 90/45: {escape(report.fallback)}")
     lines.append(table_block(report.table))
     kind, detail = outcome
-    lines.append(escape(OUTCOME[kind].format(detail)))
+    if OUTCOME[kind]:
+        lines.append(escape(OUTCOME[kind].format(detail)))
     return "\n".join(lines)
 
 

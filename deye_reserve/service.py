@@ -9,9 +9,10 @@ Replans happen
 - every hour, and after each forecast refresh (05:30 and 22:00).
 
 With DEYE_RESERVE_WRITE=true each replan also gets the table into the
-inverter when it differs. The owner hears only about a day whose DTEK
-schedule was published or changed: that day's final table and whether it
-is in the inverter; and about a write that failed. The reasons behind every
+inverter when it differs, straight away, outage or not. The owner hears
+only about a day whose DTEK schedule was published or changed: that day's
+final table, sent once it is in the inverter (a line says so only when it
+is not); and about a write that failed. The reasons behind every
 decision go to the journal (data/journal.jsonl), for the daily review.
 """
 from __future__ import annotations
@@ -312,9 +313,10 @@ class ReserveService:
         report.forecast = self.forecast
         start, end = window(now, self.p)
         days = sorted({local(start).date(), local(end).date()})
+        report.reading_fresh = bool(reading) and reading.get("soc") is not None and \
+            now - datetime.fromisoformat(reading["at"]) <= self.READING_MAX_AGE
         if report.fallback is None:
-            if not reading or reading.get("soc") is None or \
-                    now - datetime.fromisoformat(reading["at"]) > self.READING_MAX_AGE:
+            if not report.reading_fresh:
                 report.fallback = "немає свіжих даних інвертора"
             elif self.forecast is None or not self.forecast.covers(days):
                 report.fallback = "немає прогнозу сонця"
@@ -424,10 +426,10 @@ class ReserveService:
             return "попередня команда ще виконується"
         if self._write_blocked_until and now < self._write_blocked_until:
             return f"після помилки чекаю до {local(self._write_blocked_until):%H:%M}"
-        if report.grid_present is not True:
-            return "немає мережі"
-        if report.schedule is not None and any(a <= now < b for a, b in report.schedule.outages):
-            return "триває відключення за графіком"
+        # The grid does not matter: the logger runs on the battery through outages, and the house is
+        # on the Load port, router included. What matters is that it is online to take the command.
+        if not report.reading_fresh:
+            return "інвертор не на зв'язку"
         if self.state.writes_on(local(now).date()) >= self.cfg.max_writes_per_day:
             return f"вже {self.cfg.max_writes_per_day} записів сьогодні"
         return None
