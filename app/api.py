@@ -162,6 +162,22 @@ def create_app(service: Service) -> FastAPI:
     async def status(request: Request, source: Optional[str] = Query(None)):
         return schedule_payload(resolve(request, source), now_kyiv())["current_outage"]
 
+    @app.get("/api/v1/inverter/latest")
+    async def inverter_latest():
+        """The last Deye reading and the grid state, for deye-reserve (same data as the mini app's)."""
+        monitor = service.inverter
+        if monitor is None:
+            raise HTTPException(404, "the inverter is not configured")
+        now = now_kyiv()
+        grid = monitor.grid
+        return JSONResponse({
+            "source": monitor.source,
+            "reading": monitor.payload(now),
+            "last_success": monitor.last_success.isoformat() if monitor.last_success else None,
+            "last_error": monitor.last_error or None,
+            "grid": {"status": grid.status.name, "since": grid.since.isoformat()} if grid else None,
+        }, headers=NO_CACHE)
+
     @app.get("/api/v1/health")
     async def health():
         now = now_kyiv()

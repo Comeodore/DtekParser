@@ -16,7 +16,9 @@ from app.heartbeat import Heartbeat
 from app.inverter.deye import InverterMonitor
 from app.notify.outbox import Gateway, OutboxSender, TelegramGateway
 from app.notify.router import Router
+from app.power.state import PowerStatus
 from app.power.monitor import PowerMonitor
+from app.reserve_hook import ReserveHook
 from app.storage.postgres import PostgresStore
 from app.timeutil import KYIV_TZ, now_kyiv
 
@@ -51,6 +53,9 @@ class Service:
         self.gateway = gateway if gateway is not None else TelegramGateway(settings.bots, settings.dry_run)
         self.outbox = OutboxSender(self.store, self.gateway)
         self.pool = BrowserPool()
+        # deye-reserve plans the krem inverter's TOU table; it is told when that source's schedule or grid changes.
+        self.reserve = ReserveHook(settings.reserve_url)
+        reserve_source = settings.deye.source if settings.deye is not None else None
 
         self.sites: dict[str, DtekSite] = {}
         self.collectors: dict[str, SourceCollector] = {}
@@ -60,6 +65,7 @@ class Service:
             self.sites[cfg.name] = site
             self.collectors[cfg.name] = SourceCollector(
                 cfg, site, self.store, self.router, settings.fetch_interval, on_messages=self.outbox.wake,
+                on_schedule=(lambda stamp: self.reserve.fire("schedule", stamp)) if cfg.name == reserve_source else None,
             )
 
         self.power: Optional[PowerMonitor] = None
@@ -77,6 +83,7 @@ class Service:
             self.inverter = InverterMonitor(
                 settings.deye, store=self.store, router=self.router, snapshot=lambda: inverter_source.latest,
                 on_messages=self.outbox.wake,
+                on_grid=lambda t: self.reserve.fire("grid", "back" if t.status is PowerStatus.ON else "lost"),
             )
         self._tasks: list[asyncio.Task] = []
 
@@ -101,7 +108,7 @@ class Service:
             self._spawn("instance-lock", self._watch_lock)
         inverter = f"deye→{self.inverter.source}" if self.inverter else "off"
         logger.info(f"Service started: sources={list(self.collectors)}, power={'on' if self.power else 'off'}, "
-                    f"inverter={inverter}, dry_run={self.settings.dry_run}")
+                    f"inverter={inverter}, reserve={self.reserve.url or 'off'}, dry_run={self.settings.dry_run}")
 
     def problems(self, now: Optional[datetime] = None) -> list[str]:
         """Why the service is not fully working; empty when it is. Drives the heartbeat and /health."""

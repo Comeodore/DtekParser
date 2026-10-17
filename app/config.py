@@ -85,6 +85,7 @@ class Settings:
     dry_run: bool
     state_dir: str = "data"     # per-source browser cookies, kept across restarts
     deye: Optional[DeyeConfig] = None
+    reserve_url: Optional[str] = None   # deye-reserve, told when the inverter's schedule or grid changes
 
     def source(self, name: str) -> SourceConfig:
         return next(s for s in self.sources if s.name == name)
@@ -245,4 +246,5 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         dry_run=_bool(env, "NOTIFY_DRY_RUN", False),
         state_dir=_get(env, "STATE_DIR", "data"),
         deye=deye,
+        reserve_url=_get(env, "DEYE_RESERVE_URL") if deye is not None else None,
     )

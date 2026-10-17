@@ -24,7 +24,7 @@ import aiohttp
 from app.config import DeyeConfig
 from app.dtek.models import Snapshot
 from app.notify.router import Router
-from app.power.state import PowerState, PowerStatus, next_state
+from app.power.state import PowerState, PowerStatus, PowerTransition, next_state
 from app.storage.store import Store
 from app.timeutil import KYIV_TZ, now_kyiv
 
@@ -210,6 +210,7 @@ class InverterMonitor:
         router: Optional[Router] = None,
         snapshot: Callable[[], Optional[Snapshot]] = lambda: None,
         on_messages: Optional[Callable[[], None]] = None,
+        on_grid: Optional[Callable[[PowerTransition], None]] = None,
     ):
         self.config = config
         self.source = config.source
@@ -219,6 +220,7 @@ class InverterMonitor:
         self._router = router
         self._snapshot = snapshot
         self._on_messages = on_messages
+        self._on_grid = on_grid
         self._grid: Optional[PowerState] = None
         self._grid_seen = False
         self.latest: Optional[InverterReading] = None
@@ -232,6 +234,10 @@ class InverterMonitor:
         self.calls = 0
         self.readings = 0
         self.last_lag_s: Optional[float] = None
+
+    @property
+    def grid(self) -> Optional[PowerState]:
+        return self._grid
 
     @property
     def cadence(self) -> float:
@@ -344,6 +350,8 @@ class InverterMonitor:
                     f"{' (noticed after a restart)' if transition.detected_late else ''}")
         if messages and self._on_messages:
             self._on_messages()
+        if self._on_grid:
+            self._on_grid(transition)
 
     def payload(self, now: datetime) -> Optional[dict]:
         return self.latest.to_dict(now, self.STALE_S) if self.latest else None

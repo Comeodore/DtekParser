@@ -12,6 +12,7 @@ from app.dtek.legacy import legacy_row
 from app.dtek.models import Snapshot
 from app.dtek.protocol import ProtocolError, build_snapshot, parse_fact, parse_house, unknown_time_types
 from app.engine.detector import Baseline, detect
+from app.engine.events import ScheduleEvent
 from app.notify.router import Router
 from app.storage.store import Store
 from app.timeutil import KYIV_TZ, now_kyiv
@@ -36,6 +37,7 @@ class SourceCollector:
         interval: float = 60.0,
         clock: Callable[[], datetime] = now_kyiv,
         on_messages: Optional[Callable[[], None]] = None,
+        on_schedule: Optional[Callable[[str], None]] = None,
     ):
         self.config = config
         self._site = site
@@ -44,6 +46,8 @@ class SourceCollector:
         self._interval = interval
         self._clock = clock
         self._on_messages = on_messages
+        # Called with DTEK's new "last updated" stamp when the schedule data changes (not on the first fetch).
+        self._on_schedule = on_schedule
         self.latest: Optional[Snapshot] = None
         self.last_success: Optional[datetime] = None
         self.failures = 0
@@ -110,7 +114,12 @@ class SourceCollector:
         if self.failures:
             logger.info(f"[{self.name}] recovered after {self.failures} failed cycles")
         self.failures, self.last_error = 0, ""
+        previous = self.latest
         self.latest, self.last_success = snapshot, now
+        if self._on_schedule and previous is not None and (
+                snapshot.schedule_updated != previous.schedule_updated
+                or any(isinstance(e, ScheduleEvent) for e in detection.events)):
+            self._on_schedule(snapshot.schedule_updated)
         if detection.initialized:
             logger.info(f"[{self.name}] baseline initialised, no notifications for the current state")
         for event in detection.events:
