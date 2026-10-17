@@ -189,6 +189,7 @@ def combine_forecast(multi: dict, ensemble: Optional[dict], pv_per_ghi: float, f
         usable = [m for m in models if all(hourly[m][i] is not None for i in idx)]
         if not usable:
             continue
+        with_ecmwf = ecmwf in usable        # ECMWF's own half of P50 does not depend on its rank
         if ranking:
             by_name = {model_name(m): m for m in usable}
             usable = [by_name[r] for r in ranking if r in by_name][:top] or usable
@@ -196,7 +197,7 @@ def combine_forecast(multi: dict, ensemble: Optional[dict], pv_per_ghi: float, f
         for i in idx:
             key = gen_hour(times[i])
             med = _median([hourly[m][i] for m in usable])
-            mid = (med + hourly[ecmwf][i]) / 2 if ecmwf in usable else med
+            mid = (med + hourly[ecmwf][i]) / 2 if with_ecmwf else med
             low = med * 0.5
             j = ens_index.get(times[i])
             if j is not None:

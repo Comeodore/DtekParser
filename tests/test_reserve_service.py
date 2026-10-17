@@ -437,3 +437,16 @@ def test_ranking_skips_hours_with_a_full_battery():
     full = {datetime.fromtimestamp(i["timeStamp"], KYIV_TZ).hour for i in history
             if datetime.fromtimestamp(i["timeStamp"], KYIV_TZ).date() == date(2026, 10, 14) and i["batterySOC"] >= 95}
     assert full and max(s.hours for s in sunny) <= 24 - len(full)
+
+
+def test_ecmwf_keeps_its_half_of_p50_outside_the_top():
+    # 03-17.10 on the server: Météo-France, ICON and UKMO fit best, ECMWF came fourth.
+    multi, ens = fixture("openmeteo_models_20261017_1511.json"), fixture("openmeteo_ensemble_20261017_1511.json")
+    top = ["meteofrance_seamless", "icon_seamless", "ukmo_seamless"]
+    fc = combine_forecast(multi, ens, 5.35, T(17, 15), top + ["ecmwf_ifs025"], 3)
+    h = multi["hourly"]
+    i = h["time"].index("2026-10-18T13:00")
+    med = sorted(h[f"shortwave_radiation_{m}"][i] for m in top)[1]
+    assert fc.models[date(2026, 10, 18)] == top
+    assert fc.p50[(date(2026, 10, 18), 12)] == pytest.approx((med + h["shortwave_radiation_ecmwf_ifs025"][i]) / 2 * 5.35)
+    assert fc.total_kwh(date(2026, 10, 18)) > fc.total_kwh(date(2026, 10, 18), pessimistic=True) + 1
