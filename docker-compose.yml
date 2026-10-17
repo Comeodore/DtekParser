@@ -19,3 +19,24 @@ services:
       options:
         max-size: "20m"
         max-file: "5"
+
+  reserve:
+    build:
+      context: .
+      dockerfile: Dockerfile.reserve
+    image: deye-reserve:latest
+    container_name: deye-reserve
+    restart: unless-stopped
+    # Host network: it reads dtek-service on 127.0.0.1:9998 and takes its webhooks on 127.0.0.1:9997.
+    network_mode: host
+    init: true
+    env_file: .env
+    volumes:
+      # Token, state, forecast and load caches.
+      - ./reserve-data:/app/data
+    stop_grace_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

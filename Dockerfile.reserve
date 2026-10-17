@@ -1,0 +1,14 @@
+# deye-reserve: plans the krem inverter's Time of Use table. No browser, so a plain slim image.
+FROM python:3.12-slim-bookworm
+
+ENV TZ=Europe/Kyiv \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY requirements-reserve.txt .
+RUN pip install --no-cache-dir -r requirements-reserve.txt
+
+COPY deye_reserve/ ./deye_reserve/
+
+CMD ["python", "-m", "deye_reserve"]

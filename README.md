@@ -30,6 +30,31 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   live from the same Home Assistant subscription as the power monitor) and
   the building's Elevator and Water Deye inverters, read in the very same
   Deye call as the krem one (`DEYE_BATTERIES`), so they cost no extra quota.
+- **Battery plan (krem), a container of its own: `deye-reserve`.** It works
+  out the Deye inverter's Time of Use table (six slots: start, target SOC,
+  grid charge) for Круглик from the DTEK schedule (queue `DEYE_RESERVE_GROUP`,
+  read from dtek-service on 127.0.0.1:9998), the sun (Open-Meteo: P50 =
+  mean of ECMWF and the median of seven models, pessimistic = min of the
+  ECMWF-ensemble P10 and that median; PV W = 5.35 × GHI) and the house's
+  load (Deye station history, a week, once a day). The night target is the
+  cheapest one from 45 to 95% that keeps ≥25% through every outage in the
+  pessimistic case (P80 load ×1.1); by day the battery stays at ≥45% for
+  unscheduled outages, and outages the night charge cannot cover get a
+  grid charge right before them. Once a week the night goes to 100% to
+  keep the SOC calibrated. Without a schedule, a forecast or a fresh
+  inverter reading it falls back to the old 90/45 table. dtek-service
+  posts to it when krem's schedule data changes and when the inverter
+  loses or regains the grid (`DEYE_RESERVE_URL`, `/api/v1/inverter/latest`
+  gives it SOC and grid); it replans 2.5 min after such an event (batches),
+  polls the schedule every 10 min as a fallback, replans hourly and after
+  the 05:30 and 22:00 forecast refresh. The plan goes to the owner's own
+  chat (`DEYE_RESERVE_CHAT_ID`) through the krem bot, only when the table,
+  its status or the schedule changes. Writing to the inverter
+  (`/order/sys/tou/update`, then waiting for the order and for
+  `/config/tou` to show the table) exists but is off: it needs
+  `DEYE_RESERVE_WRITE=true`, and then writes only a changed table, with the
+  grid present, outside an outage, at most 6 times a day, one command at a
+  time. `GET 127.0.0.1:9997/plan` shows the current plan, `/health` the loop.
 - **Mini app and API.** Each source's port serves its Telegram mini app and
   `/api/v1/*`: kem on 9999, krem on 9998.
 - **Wake-on-LAN.** `POST /api/v1/wol` is kept for HA's
@@ -101,4 +126,6 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-`tests/fixtures` holds real DTEK responses from 01.10.2026.
+`tests/fixtures` holds real DTEK responses from 01.10.2026, and for
+deye-reserve the Deye station history of 09-17.10.2026 and Open-Meteo
+day-ahead forecasts (previous runs) of those days.

@@ -8,3 +8,5 @@ venv/
 .venv
 screenshots/
 data/
+reserve-data/
+tests/
