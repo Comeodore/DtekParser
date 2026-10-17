@@ -25,7 +25,7 @@ from typing import Optional, Protocol
 from deye_reserve.config import Config
 from deye_reserve.deye import ORDER_DONE, ORDER_ERRORS, ORDER_FINAL, DeyeError, DeyeRateLimited, tou_request
 from deye_reserve.inputs import (Forecast, InputError, LoadProfile, Schedule, changed_days, combine_forecast,
-                                 load_profile, parse_schedule)
+                                 load_profile, parse_schedule, rank_models)
 from deye_reserve.journal import Journal
 from deye_reserve.messages import Report, render_alarm, render_day, table_line
 from deye_reserve.planner import Inputs, Planner, Table, local, safe_table, window
@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 class Sources(Protocol):
     async def schedule(self) -> dict: ...                # dtek-service GET /api/v1/schedule (krem)
     async def inverter(self) -> dict: ...                # dtek-service GET /api/v1/inverter/latest
+    async def previous_runs(self, first: date, last: date) -> dict: ...   # Open-Meteo, day-ahead per model
     async def weather(self) -> tuple[dict, Optional[dict]]: ...   # Open-Meteo models, ECMWF ensemble
 
 
@@ -83,6 +84,7 @@ class ReserveService:
         self.journal.prune(clock())
         self.forecast: Optional[Forecast] = None
         self.load: Optional[LoadProfile] = None
+        self.ranking: Optional[list[dict]] = None      # models by fit to the panels, best first
         self._load_caches()
         self.report: Optional[Report] = None
         self.last_error = ""
@@ -116,6 +118,13 @@ class ReserveService:
                 self.load = LoadProfile.from_dict(data)
             except (KeyError, ValueError) as e:
                 logger.warning(f"load cache unreadable: {e}")
+        data = read_json(self.cfg.data_dir / "models.json")
+        if data and data.get("scores"):
+            self.ranking = data["scores"]
+
+    @property
+    def top_models(self) -> Optional[list[str]]:
+        return [s["model"] for s in self.ranking] if self.ranking else None
 
     def _save(self) -> None:
         try:
@@ -181,7 +190,7 @@ class ReserveService:
         if now >= self._next_forecast:
             await self.refresh_forecast(now)
         if now >= self._next_load:
-            await self.refresh_load(now)
+            await self.refresh_history(now)
         if now >= self._next_poll:
             self._next_poll = now + timedelta(seconds=self.cfg.poll_s)
             await self.poll_schedule(now)
@@ -205,7 +214,8 @@ class ReserveService:
     async def refresh_forecast(self, now: datetime) -> None:
         try:
             multi, ensemble = await self.sources.weather()
-            self.forecast = combine_forecast(multi, ensemble, self.cfg.pv_per_ghi, now)
+            self.forecast = combine_forecast(multi, ensemble, self.cfg.pv_per_ghi, now, self.top_models,
+                                             self.cfg.top_models)
             write_json(self.cfg.data_dir / "forecast.json", self.forecast.to_dict())
             self._forecast_new = True
             self._next_forecast = self.next_forecast_time(now)
@@ -214,21 +224,43 @@ class ReserveService:
             self._next_forecast = now + self.RETRY_INPUT
             logger.warning(f"forecast refresh failed: {type(e).__name__}: {e}")
 
-    async def refresh_load(self, now: datetime) -> None:
-        """The house's hourly load over the last week, from Deye history: one call a day."""
-        if self.load is not None and local(self.load.fetched_at).date() == local(now).date():
+    async def refresh_history(self, now: datetime) -> None:
+        """Once a day, from one Deye history call: the house's load over the last week, and which
+        weather models' day-ahead sun matched the panels best over `rank_days`."""
+        today = local(now).date()
+        if self.load is not None and local(self.load.fetched_at).date() == today and self.ranking:
             self._next_load = self._next_midnight(now)
             return
+        start = now - timedelta(days=max(self.cfg.rank_days, self.LOAD_DAYS))
         try:
-            start = now - timedelta(days=self.LOAD_DAYS)
             items = await self.deye.history_power(self.cfg.station_id, start, now)
-            self.load = load_profile(items, local(start).date(), local(now).date(), now)
+            first = local(now - timedelta(days=self.LOAD_DAYS)).date()
+            self.load = load_profile(items, first, today, now)
             write_json(self.cfg.data_dir / "load.json", self.load.to_dict())
             self._next_load = self._next_midnight(now)
             logger.info(f"load profile: {sum(self.load.mean.values()) / 1000:.1f} kWh/day over {self.load.days} days")
         except Exception as e:
             self._next_load = now + self.RETRY_LOAD
             logger.warning(f"load history failed: {type(e).__name__}: {e}")
+            return
+        try:
+            first = local(start).date()
+            scores = rank_models(await self.sources.previous_runs(first, today), items, self.cfg.pv_per_ghi,
+                                 first, today)
+        except Exception as e:
+            logger.warning(f"model ranking failed: {type(e).__name__}: {e}")
+            return
+        if len(scores) < self.cfg.top_models:
+            logger.warning(f"model ranking: only {len(scores)} models with enough hours, keeping the old one")
+            return
+        before = (self.top_models or [])[:self.cfg.top_models]
+        self.ranking = [{"model": s.model, "mae_w": round(s.mae_w), "bias_w": round(s.bias_w), "hours": s.hours}
+                        for s in scores]
+        write_json(self.cfg.data_dir / "models.json", {"at": now.isoformat(), "days": [first.isoformat(), today.isoformat()],
+                                                       "scores": self.ranking})
+        logger.info("models by fit: " + ", ".join(f"{s.model} {s.mae_w:.0f} W" for s in scores))
+        if self.top_models[:self.cfg.top_models] != before:
+            self._next_forecast = now       # rebuild the sun with the new top
 
     def _next_midnight(self, now: datetime) -> datetime:
         return datetime.combine(local(now).date() + timedelta(days=1), time(0, 20), KYIV_TZ)
@@ -340,6 +372,8 @@ class ReserveService:
                                                round(self.forecast.total_kwh(d, True), 2)]
                                for d in (today, today + timedelta(days=1))}
             row["forecast_at"] = self.forecast.fetched_at.isoformat()
+            row["models"] = {d.isoformat(): m for d, m in self.forecast.models.items()
+                             if d in (today, today + timedelta(days=1))}
         if self.load is not None:
             row["load_kwh"] = [round(sum(self.load.mean.values()) / 1000, 2),
                                round(sum(max(v, self.load.mean.get(h, 0)) for h, v in self.load.p80.items())
@@ -484,6 +518,7 @@ class ReserveService:
             "event_due": self.event_due.isoformat() if self.event_due else None,
             "forecast_at": self.forecast.fetched_at.isoformat() if self.forecast else None,
             "load_at": self.load.fetched_at.isoformat() if self.load else None,
+            "models": self.ranking,
             "write": self.cfg.write,
             "writes_today": self.state.writes_on(local(now).date()),
             "deye_calls": getattr(self.deye, "calls", None),

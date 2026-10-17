@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import statistics
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence
 
 from deye_reserve.planner import Outage
 from deye_reserve.timeutil import KYIV_TZ
@@ -117,6 +117,7 @@ class Forecast:
     pess: dict[tuple[date, int], float]
     fetched_at: datetime
     ensemble: bool
+    models: dict[date, list[str]] = field(default_factory=dict)    # whose median it is, by day
 
     def covers(self, days: Iterable[date]) -> bool:
         return all((d, h) in self.p50 for d in days for h in range(6, 19))
@@ -129,21 +130,23 @@ class Forecast:
         def pack(src):
             return {f"{d.isoformat()}T{h:02d}": round(v, 1) for (d, h), v in src.items()}
         return {"p50": pack(self.p50), "pess": pack(self.pess), "fetched_at": self.fetched_at.isoformat(),
-                "ensemble": self.ensemble}
+                "ensemble": self.ensemble, "models": {d.isoformat(): m for d, m in self.models.items()}}
 
     @classmethod
     def from_dict(cls, data: dict) -> "Forecast":
         def unpack(src):
             return {(date.fromisoformat(k[:10]), int(k[11:13])): v for k, v in src.items()}
         return cls(unpack(data["p50"]), unpack(data["pess"]), datetime.fromisoformat(data["fetched_at"]),
-                   data.get("ensemble", False))
+                   data.get("ensemble", False),
+                   {date.fromisoformat(d): m for d, m in (data.get("models") or {}).items()})
 
 
 def _median(values: list[float]) -> float:
     return statistics.median(values)
 
 
-def combine_forecast(multi: dict, ensemble: Optional[dict], pv_per_ghi: float, fetched_at: datetime) -> Forecast:
+def combine_forecast(multi: dict, ensemble: Optional[dict], pv_per_ghi: float, fetched_at: datetime,
+                     ranking: Optional[Sequence[str]] = None, top: int = 3) -> Forecast:
     """P50 and pessimistic PV per hour from Open-Meteo's multi-model and ECMWF-ensemble answers.
 
     Backtest 23.08-16.10 (day-ahead vs satellite): ECMWF IFS had the lowest
@@ -151,7 +154,9 @@ def combine_forecast(multi: dict, ensemble: Optional[dict], pv_per_ghi: float, f
     and the default best_match (ICON) under-forecast. So:
       P50  = mean(ECMWF, median of models)
       pess = min(ECMWF ensemble P10, median of models)
-    A model with gaps on a day (UKMO beyond ~2 days) is left out for that day.
+    With a `ranking` (rank_models: best fit to this roof first) the median is
+    of the `top` best models only. A model with gaps on a day (UKMO beyond
+    ~2 days) is left out for that day, and the next one in the ranking stands in.
     Radiation is the mean of the preceding hour: the value stamped h+1 is PV hour h.
     Without the ensemble the pessimistic case is half the median.
     """
@@ -177,13 +182,17 @@ def combine_forecast(multi: dict, ensemble: Optional[dict], pv_per_ghi: float, f
         members = {k: v for k, v in eh.items() if k != "time"}
         ens_index = {t: i for i, t in enumerate(eh.get("time") or [])}
 
-    p50, pess = {}, {}
+    p50, pess, used = {}, {}, {}
     for day, idx in by_day.items():
         if not DAYLIGHT <= {gen_hour(times[i])[1] for i in idx}:
             continue        # a day cut by the range is not used
         usable = [m for m in models if all(hourly[m][i] is not None for i in idx)]
         if not usable:
             continue
+        if ranking:
+            by_name = {model_name(m): m for m in usable}
+            usable = [by_name[r] for r in ranking if r in by_name][:top] or usable
+        used[day] = [model_name(m) for m in usable]
         for i in idx:
             key = gen_hour(times[i])
             med = _median([hourly[m][i] for m in usable])
@@ -198,7 +207,67 @@ def combine_forecast(multi: dict, ensemble: Optional[dict], pv_per_ghi: float, f
             pess[key] = low * pv_per_ghi
     if not p50:
         raise InputError("у прогнозі Open-Meteo немає повних днів")
-    return Forecast(p50, pess, fetched_at, bool(members))
+    return Forecast(p50, pess, fetched_at, bool(members), used)
+
+
+# ---- Which models fit this roof ----
+
+# Above this the battery is about full: with zero export the inverter then holds PV down to the load.
+FULL_SOC = 95.0
+
+
+def model_name(key: str) -> str:
+    """shortwave_radiation_previous_day1_ecmwf_ifs025 / shortwave_radiation_ecmwf_ifs025 -> ecmwf_ifs025."""
+    for prefix in ("shortwave_radiation_previous_day1_", "shortwave_radiation_"):
+        if key.startswith(prefix):
+            return key[len(prefix):]
+    return key
+
+
+@dataclass(frozen=True)
+class ModelScore:
+    model: str
+    mae_w: float        # mean absolute error of hourly PV, W
+    bias_w: float       # mean (forecast - actual), W
+    hours: int
+
+
+def rank_models(previous: dict, items: list[dict], pv_per_ghi: float, first: date, last: date,
+                min_hours: int = 30) -> list[ModelScore]:
+    """Models by how well their day-ahead forecast matched what the panels gave, best first.
+
+    `previous` is Open-Meteo's previous-runs answer (shortwave_radiation_previous_day1 per model),
+    `items` Deye's station history. An hour counts when the logger covered it and the battery
+    stayed below FULL_SOC all through it, and it had sun in the forecast or on the panels.
+    """
+    points: dict[tuple[date, int], list[tuple[float, Optional[float]]]] = defaultdict(list)
+    for item in items:
+        t = datetime.fromtimestamp(float(item["timeStamp"]), KYIV_TZ)
+        if first <= t.date() <= last:
+            points[t.date(), t.hour].append((float(item.get("generationPower") or 0), item.get("batterySOC")))
+    actual = {}
+    for key, pts in points.items():
+        if len(pts) >= 10 and all(soc is not None and soc < FULL_SOC for _, soc in pts):
+            actual[key] = sum(pv for pv, _ in pts) / len(pts)
+    hourly = previous.get("hourly") or {}
+    times = hourly.get("time") or []
+    scores = []
+    for key in (k for k in hourly if k != "time"):
+        errors, biases = [], []
+        for i, stamp in enumerate(times):
+            value = hourly[key][i]
+            t = datetime.fromisoformat(stamp) - timedelta(hours=1)     # stamped h+1 = PV hour h
+            got = actual.get((t.date(), t.hour))
+            if value is None or got is None:
+                continue
+            forecast = value * pv_per_ghi
+            if forecast < 20 and got < 20:
+                continue        # night
+            errors.append(abs(forecast - got))
+            biases.append(forecast - got)
+        if len(errors) >= min_hours:
+            scores.append(ModelScore(model_name(key), sum(errors) / len(errors), sum(biases) / len(biases), len(errors)))
+    return sorted(scores, key=lambda s: s.mae_w)
 
 
 # ---- Load (Deye station/history/power) ----

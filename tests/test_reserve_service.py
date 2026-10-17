@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from deye_reserve.config import ConfigError, load_config
 from deye_reserve.deye import parse_tou, tou_request
-from deye_reserve.inputs import InputError, changed_days, parse_schedule
+from deye_reserve.inputs import InputError, changed_days, combine_forecast, parse_schedule, rank_models
 from deye_reserve.planner import Params, Slot, safe_table
 from deye_reserve.review import actual, decisions
 from deye_reserve.service import ReserveService
@@ -107,6 +107,9 @@ class Sources:
     async def inverter(self):
         return {"source": "krem", "reading": {"at": (self._clock() - timedelta(minutes=1)).isoformat(), **self.reading}}
 
+    async def previous_runs(self, first, last):
+        return fixture("openmeteo_previous_day1_models_20261013_17.json")
+
     async def weather(self):
         if not self.weather_ok:
             raise RuntimeError("open-meteo down")
@@ -169,8 +172,8 @@ def make(tmp_path):
 
 
 async def ready(service, now):
+    await service.refresh_history(now)
     await service.refresh_forecast(now)
-    await service.refresh_load(now)
 
 
 async def test_plan_is_sent_once_and_again_when_the_schedule_changes(make):
@@ -394,3 +397,43 @@ async def test_review_lines_up_decisions_with_the_day(make):
     assert day[0] == "SOC: start 32%, lowest 19% at 16.10 11:45, 23:00 90%, end 90%"
     assert day[1].startswith("grid bought: day ") and not day[1].startswith("grid bought: day 0.00 kWh, night 0.00")
     assert day[2].startswith("outage 16.10 09:05-15:00: SOC ") and day[3].startswith("outage 16.10 18:23-22:27")
+
+
+TOP3 = ["icon_seamless", "meteofrance_seamless", "ecmwf_ifs025"]       # 186, 187 and 194 W off on 13-17.10
+
+
+async def test_the_sun_is_the_median_of_the_models_that_fit_the_panels(make):
+    service, clock = make()
+    await ready(service, clock["now"])
+    # 13-17.10 against Deye's history: hours with the battery near full do not count (zero export cuts PV).
+    assert [s["model"] for s in service.ranking[:3]] == TOP3 and service.ranking[-1]["model"] == "cma_grapes_global"
+    assert all(s["hours"] >= 30 for s in service.ranking)
+    assert service.forecast.models[date(2026, 10, 18)] == TOP3
+    multi = fixture("openmeteo_models_20261017_1511.json")["hourly"]
+    i = multi["time"].index("2026-10-18T13:00")
+    top = sorted(multi[f"shortwave_radiation_{m}"][i] for m in TOP3)
+    ens = fixture("openmeteo_ensemble_20261017_1511.json")["hourly"]
+    p10 = sorted(v[i] for k, v in ens.items() if k != "time")[5]
+    assert service.forecast.p50[(date(2026, 10, 18), 12)] == pytest.approx(
+        (top[1] + multi["shortwave_radiation_ecmwf_ifs025"][i]) / 2 * 5.35)
+    assert service.forecast.pess[(date(2026, 10, 18), 12)] == pytest.approx(min(p10, top[1]) * 5.35)
+    await service.replan(clock["now"], "test")
+    assert service.journal.read()[0]["models"]["2026-10-18"] == TOP3
+
+
+def test_a_model_missing_a_day_gives_way_to_the_next():
+    multi, ens = fixture("openmeteo_models_20261017_1511.json"), fixture("openmeteo_ensemble_20261017_1511.json")
+    ranking = ["ukmo_seamless", "ecmwf_ifs025", "gem_seamless", "icon_seamless"]
+    fc = combine_forecast(multi, ens, 5.35, T(17, 15), ranking, 3)
+    assert fc.models[date(2026, 10, 18)] == ["ukmo_seamless", "ecmwf_ifs025", "gem_seamless"]
+    assert fc.models[date(2026, 10, 19)] == ["ecmwf_ifs025", "gem_seamless", "icon_seamless"]   # UKMO has gaps
+    assert len(combine_forecast(multi, ens, 5.35, T(17, 15)).models[date(2026, 10, 18)]) == 7     # no ranking: all
+
+
+def test_ranking_skips_hours_with_a_full_battery():
+    history = fixture("deye_history_power_20261009_17.json")["stationDataItems"]
+    previous = fixture("openmeteo_previous_day1_models_20261013_17.json")
+    sunny = rank_models(previous, history, 5.35, date(2026, 10, 14), date(2026, 10, 14), min_hours=1)
+    full = {datetime.fromtimestamp(i["timeStamp"], KYIV_TZ).hour for i in history
+            if datetime.fromtimestamp(i["timeStamp"], KYIV_TZ).date() == date(2026, 10, 14) and i["batterySOC"] >= 95}
+    assert full and max(s.hours for s in sunny) <= 24 - len(full)

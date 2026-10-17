@@ -20,7 +20,7 @@ from deye_reserve.deye import DeyeClient
 from deye_reserve.journal import Journal
 from deye_reserve.messages import table_line
 from deye_reserve.planner import Params
-from deye_reserve.state import load_state, table_from_list
+from deye_reserve.state import load_state, read_json, table_from_list
 from deye_reserve.timeutil import KYIV_TZ, now_kyiv
 
 
@@ -60,6 +60,8 @@ def decisions(rows: list[dict]) -> list[str]:
             line += f"\n    outages {outs}; tomorrow published {row.get('tomorrow_published')} (DTEK {row.get('stamp')})"
         if row.get("forecast"):
             line += "\n    sun P50/pess kWh " + ", ".join(f"{d[8:10]}.{d[5:7]} {v[0]}/{v[1]}" for d, v in row["forecast"].items())
+            if row.get("models"):
+                line += " (median of " + "; ".join(f"{d[8:10]}.{d[5:7]} {', '.join(m)}" for d, m in row["models"].items()) + ")"
         if row.get("load_kwh"):
             line += f"; load mean/safe {row['load_kwh'][0]}/{row['load_kwh'][1]} kWh/day"
         if row.get("expected"):
@@ -147,6 +149,10 @@ async def review(end: datetime) -> str:
         except Exception as e:
             out.append(f"TOU read failed: {type(e).__name__}: {e}")
     out.append(f"writes per day: {state.writes}; last write: {state.last_write}")
+    models = read_json(cfg.data_dir / "models.json")
+    if models:
+        out.append(f"models by fit to the panels {models.get('days')}: " + ", ".join(
+            f"{s['model']} {s['mae_w']} W (bias {s['bias_w']:+}, {s['hours']} h)" for s in models["scores"]))
     return "\n".join(out)
 
 

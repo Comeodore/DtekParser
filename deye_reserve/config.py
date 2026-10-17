@@ -38,6 +38,8 @@ class Config:
     latitude: float
     longitude: float
     pv_per_ghi: float           # PV W per W/m2 of global horizontal irradiance
+    top_models: int             # the sun's median is of this many models that fit the panels best
+    rank_days: int              # ...judged over this many days
     host: str
     port: int
     data_dir: Path
@@ -144,6 +146,8 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
         latitude=_num(env, "DEYE_RESERVE_LATITUDE", 50.3084),
         longitude=_num(env, "DEYE_RESERVE_LONGITUDE", 30.4067),
         pv_per_ghi=_num(env, "DEYE_RESERVE_PV_PER_GHI", 5.35),
+        top_models=_num(env, "DEYE_RESERVE_TOP_MODELS", 3, int),
+        rank_days=_num(env, "DEYE_RESERVE_RANK_DAYS", 14, int),
         host=_get(env, "DEYE_RESERVE_HOST", "127.0.0.1"),
         port=_num(env, "DEYE_RESERVE_PORT", 9997, int),
         data_dir=Path(_get(env, "DEYE_RESERVE_DATA_DIR", "data")),

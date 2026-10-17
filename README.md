@@ -34,9 +34,12 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   out the Deye inverter's Time of Use table (six slots: start, target SOC,
   grid charge) for Круглик from the DTEK schedule (queue `DEYE_RESERVE_GROUP`,
   read from dtek-service on 127.0.0.1:9998), the sun (Open-Meteo: P50 =
-  mean of ECMWF and the median of seven models, pessimistic = min of the
-  ECMWF-ensemble P10 and that median; PV W = 5.35 × GHI) and the house's
-  load (Deye station history, a week, once a day). The night target is the
+  mean of ECMWF and the median of the three models whose day-ahead
+  forecasts matched the panels best over the last two weeks, pessimistic =
+  min of the ECMWF-ensemble P10 and that median; PV W = 5.35 × GHI) and the
+  house's load (a week). Both come from one Deye history call a day; the
+  model ranking leaves out hours with the battery near full, when zero
+  export holds the panels down. The night target is the
   cheapest one from 45 to 95% that keeps ≥25% through every outage in the
   pessimistic case (P80 load ×1.1); by day the battery stays at ≥45% for
   unscheduled outages, and outages the night charge cannot cover get a
