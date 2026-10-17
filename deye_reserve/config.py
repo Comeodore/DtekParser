@@ -53,6 +53,11 @@ class Config:
     poll_s: float               # fallback look at the schedule
     replan_s: float
     forecast_at: tuple[time, ...]
+    # Solcast (watched only: logged and compared with the panels, not planned with)
+    solcast_key: Optional[str]
+    solcast_site: Optional[str]
+    solcast_at: tuple[time, ...]
+    solcast_max_calls: int      # per UTC day; the free tier allows 10
     # Writing
     write: bool
     max_writes_per_day: int
@@ -159,6 +164,11 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
         poll_s=_num(env, "DEYE_RESERVE_POLL_S", 600.0),
         replan_s=_num(env, "DEYE_RESERVE_REPLAN_S", 3600.0),
         forecast_at=_times(_get(env, "DEYE_RESERVE_FORECAST_AT", "05:30,22:00")),
+        solcast_key=_get(env, "SOLCAST_API_KEY"),
+        solcast_site=_get(env, "SOLCAST_SITE_ID"),
+        # Off the round minutes: Solcast answers 429 at busy times.
+        solcast_at=_times(_get(env, "DEYE_RESERVE_SOLCAST_AT", "05:34,08:34,10:34,12:34,14:34,22:04")),
+        solcast_max_calls=_num(env, "DEYE_RESERVE_SOLCAST_MAX_CALLS", 8, int),
         write=_bool(env, "DEYE_RESERVE_WRITE", False),
         max_writes_per_day=_num(env, "DEYE_RESERVE_MAX_WRITES", 6, int),
     )

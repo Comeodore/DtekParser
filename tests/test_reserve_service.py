@@ -7,9 +7,10 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from deye_reserve.config import ConfigError, load_config
 from deye_reserve.deye import parse_tou, tou_request
-from deye_reserve.inputs import InputError, changed_days, combine_forecast, parse_schedule, rank_models
+from deye_reserve.inputs import (InputError, changed_days, combine_forecast, parse_schedule, parse_solcast,
+                                 rank_models)
 from deye_reserve.planner import Params, Slot, safe_table
-from deye_reserve.review import actual, decisions
+from deye_reserve.review import actual, decisions, solcast_lines
 from deye_reserve.service import ReserveService
 from deye_reserve.web import make_app
 from deye_reserve.timeutil import KYIV_TZ
@@ -481,3 +482,65 @@ def test_ecmwf_keeps_its_half_of_p50_outside_the_top():
     assert fc.models[date(2026, 10, 18)] == top
     assert fc.p50[(date(2026, 10, 18), 12)] == pytest.approx((med + h["shortwave_radiation_ecmwf_ifs025"][i]) / 2 * 5.35)
     assert fc.total_kwh(date(2026, 10, 18)) > fc.total_kwh(date(2026, 10, 18), pessimistic=True) + 1
+
+
+SOLCAST = {"forecasts": [
+    {"pv_estimate": 1.2, "pv_estimate10": 0.6, "pv_estimate90": 1.6, "period_end": "2026-10-18T07:30:00.0000000Z", "period": "PT30M"},
+    {"pv_estimate": 1.4, "pv_estimate10": 0.8, "pv_estimate90": 1.8, "period_end": "2026-10-18T08:00:00.0000000Z", "period": "PT30M"},
+    {"pv_estimate": 2.0, "pv_estimate10": 1.0, "pv_estimate90": 2.4, "period_end": "2026-10-19T08:30:00.0000000Z", "period": "PT30M"},
+]}
+
+
+def test_solcast_half_hours_become_kyiv_hours():
+    hours = parse_solcast(SOLCAST)
+    # 07:00-08:00 UTC is 10:00-11:00 in Kyiv (UTC+3 until 25.10)
+    assert hours[(date(2026, 10, 18), 10)] == pytest.approx((1300, 700, 1700))
+    assert hours[(date(2026, 10, 19), 11)] == pytest.approx((2000, 1000, 2400))
+
+
+class FakeSolcast:
+    def __init__(self, *answers):
+        self.answers, self.calls = list(answers), 0
+
+    async def forecasts(self):
+        self.calls += 1
+        answer = self.answers.pop(0) if self.answers else SOLCAST
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+async def test_solcast_is_watched_within_its_budget(tmp_path):
+    clock = {"now": T(18, 5, 34)}
+    config = load_config({**ENV, "DEYE_RESERVE_DATA_DIR": str(tmp_path), "SOLCAST_API_KEY": "k", "SOLCAST_SITE_ID": "s",
+                          "DEYE_RESERVE_SOLCAST_MAX_CALLS": "3"})
+    solcast = FakeSolcast(RuntimeError("busy"))
+    service = ReserveService(config, Sources(lambda: clock["now"]), Deye(), Messenger(), clock=lambda: clock["now"],
+                             solcast=solcast)
+    assert service._next_solcast == T(18, 8, 34)
+    await service.refresh_solcast(T(18, 8, 34))                      # a failure: once more in 15 min
+    assert service._next_solcast == T(18, 8, 49) and service.solcast_log.read() == []
+    await service.refresh_solcast(T(18, 8, 49))
+    row = service.solcast_log.read()[0]
+    assert row["days"]["2026-10-18"] == [1.3, 0.7, 1.7] and row["hours"]["2026-10-18T10"] == [1300, 700, 1700]
+    assert service._next_solcast == T(18, 10, 34)
+    await service.refresh_solcast(T(18, 10, 34))
+    await service.refresh_solcast(T(18, 12, 34))                     # the fourth call today: over the budget
+    assert solcast.calls == 3 and service.state.solcast_calls == {"2026-10-18": 3}
+    # Not planned with: the sun still comes from Open-Meteo.
+    assert service.health()["solcast"]["on"]
+
+
+def test_no_key_no_solcast(make):
+    service, _ = make()
+    assert service.solcast is None and service._next_solcast is None and service.cfg.solcast_key is None
+
+
+def test_review_puts_solcast_next_to_the_panels():
+    history = fixture("deye_history_power_20261009_17.json")["stationDataItems"]
+    rows = [{"at": "2026-10-15T22:04:00+03:00", "kind": "solcast", "days": {"2026-10-16": [2.4, 1.1, 3.9]},
+             "hours": {f"2026-10-16T{h:02d}": [300, 150, 500] for h in range(8, 17)}}]
+    lines = solcast_lines(rows, history, date(2026, 10, 16))
+    assert lines[0].startswith("panels 16.10: 1.7") and "hours usable" in lines[0]
+    assert lines[1].startswith("solcast day-ahead (15.10 22:04): P50 2.4 / P10 1.1 / P90 3.9 kWh; hourly error ")
+    assert lines[2] == "solcast morning (15.10 22:04): P50 2.4 / P10 1.1 / P90 3.9 kWh; hourly error " + lines[1].split("hourly error ")[1]

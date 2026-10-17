@@ -35,6 +35,7 @@ class State:
     writes: dict = field(default_factory=dict)  # ISO date -> write attempts
     last_write: Optional[dict] = None
     verify: Optional[dict] = None               # a written table the cloud has yet to show: table, order, sent
+    solcast_calls: dict = field(default_factory=dict)   # UTC date -> Solcast calls made
 
     def writes_on(self, day: date) -> int:
         return int(self.writes.get(day.isoformat(), 0))

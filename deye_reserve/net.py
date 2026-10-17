@@ -54,6 +54,27 @@ class HttpSources:
         return multi, ensemble
 
 
+class SolcastLimited(Exception):
+    pass
+
+
+class Solcast:
+    """The rooftop site's forecast; the key goes in a header, never in a URL that could reach a log."""
+
+    def __init__(self, api_key: str, site_id: str, session: aiohttp.ClientSession):
+        self._url = f"https://api.solcast.com.au/rooftop_sites/{site_id}/forecasts"
+        self._headers = {"Authorization": f"Bearer {api_key}"}
+        self._session = session
+
+    async def forecasts(self) -> dict:
+        async with self._session.get(self._url, params={"format": "json", "hours": 72}, headers=self._headers) as r:
+            if r.status == 429:
+                raise SolcastLimited("Solcast: 429")
+            if r.status >= 400:
+                raise RuntimeError(f"Solcast: HTTP {r.status}")
+            return await r.json(content_type=None)
+
+
 class Telegram:
     """sendMessage to the owner's chat through the krem bot; a few retries, then the message is dropped."""
     TRIES = 4

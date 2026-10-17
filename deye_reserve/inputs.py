@@ -271,6 +271,23 @@ def rank_models(previous: dict, items: list[dict], pv_per_ghi: float, first: dat
     return sorted(scores, key=lambda s: s.mae_w)
 
 
+# ---- Solcast (rooftop site forecasts) ----
+
+def parse_solcast(data: dict) -> dict[tuple[date, int], tuple[float, float, float]]:
+    """Half-hourly kW (P50, P10, P90) by period end in UTC -> hourly W by (Kyiv date, hour)."""
+    halves: dict[tuple[date, int], list[tuple[float, float, float]]] = defaultdict(list)
+    for item in data.get("forecasts") or []:
+        end = item.get("period_end")
+        if not end:
+            continue
+        # "2026-10-18T10:30:00.0000000Z": seven fractional digits are more than fromisoformat takes.
+        stamp = datetime.fromisoformat(end.split(".")[0].rstrip("Z") + "+00:00")
+        start = (stamp - timedelta(minutes=30)).astimezone(KYIV_TZ)
+        halves[start.date(), start.hour].append(tuple(float(item.get(k) or 0) * 1000 for k in
+                                                      ("pv_estimate", "pv_estimate10", "pv_estimate90")))
+    return {key: tuple(sum(v[i] for v in vals) / len(vals) for i in range(3)) for key, vals in halves.items()}
+
+
 # ---- Load (Deye station/history/power) ----
 
 @dataclass(frozen=True)

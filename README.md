@@ -64,8 +64,12 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   most 6 writes a day, one command at a time. Every replan, write and
   message goes to `reserve-data/journal.jsonl` with what it was based on;
   `docker exec deye-reserve python -m deye_reserve.review` lines a day's
-  decisions up with what Deye recorded. `GET 127.0.0.1:9997/plan` shows
-  the current plan, `/health` the loop.
+  decisions up with what Deye recorded. With `SOLCAST_API_KEY` and
+  `SOLCAST_SITE_ID` it also fetches the Solcast rooftop forecast six
+  times a day (at most 8 calls; the free tier allows 10) into
+  `reserve-data/solcast.jsonl`. It is only watched: the review compares it
+  with the panels next to the models, the plan still uses Open-Meteo.
+  `GET 127.0.0.1:9997/plan` shows the current plan, `/health` the loop.
 - **Mini app and API.** Each source's port serves its Telegram mini app and
   `/api/v1/*`: kem on 9999, krem on 9998.
 - **Wake-on-LAN.** `POST /api/v1/wol` is kept for HA's

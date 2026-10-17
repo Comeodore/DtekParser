@@ -20,13 +20,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import asdict
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional, Protocol
 
 from deye_reserve.config import Config
 from deye_reserve.deye import ORDER_DONE, ORDER_ERRORS, ORDER_FINAL, DeyeError, DeyeRateLimited, tou_request
 from deye_reserve.inputs import (Forecast, InputError, LoadProfile, Schedule, changed_days, combine_forecast,
-                                 load_profile, parse_schedule, rank_models)
+                                 load_profile, parse_schedule, parse_solcast, rank_models)
 from deye_reserve.journal import Journal
 from deye_reserve.messages import Report, render_alarm, render_day, table_line
 from deye_reserve.planner import Inputs, Planner, Table, local, safe_table, window
@@ -51,6 +51,10 @@ class Deye(Protocol):
     async def order(self, order_id: str) -> dict: ...
 
 
+class SolcastSource(Protocol):
+    async def forecasts(self) -> dict: ...
+
+
 class Messenger(Protocol):
     async def send(self, text: str) -> bool: ...
 
@@ -72,7 +76,7 @@ class ReserveService:
     WRITE_BACKOFF = timedelta(minutes=30)
 
     def __init__(self, config: Config, sources: Sources, deye: Deye, messenger: Messenger,
-                 clock=now_kyiv, sleep=asyncio.sleep):
+                 clock=now_kyiv, sleep=asyncio.sleep, solcast: Optional[SolcastSource] = None):
         self.cfg = config
         self.p = config.params
         self.planner = Planner(config.params)
@@ -84,6 +88,10 @@ class ReserveService:
         self._state_path = config.data_dir / "state.json"
         self.state = load_state(self._state_path)
         self.journal = Journal(config.data_dir / "journal.jsonl")
+        # Solcast is only watched: its forecasts are kept for the morning review, not planned with.
+        self.solcast = solcast
+        self.solcast_log = Journal(config.data_dir / "solcast.jsonl")
+        self.solcast_log.prune(clock())
         self.journal.prune(clock())
         self.forecast: Optional[Forecast] = None
         self.load: Optional[LoadProfile] = None
@@ -100,6 +108,7 @@ class ReserveService:
         self._next_poll = now
         self._next_replan = now
         self._next_forecast = now if not self._forecast_fresh(now) else self.next_forecast_time(now)
+        self._next_solcast = self.next_time(now, config.solcast_at) if solcast else None
         self._next_load = now
         self._forecast_new = False
         self._tou_cache: Optional[tuple[datetime, Table]] = None
@@ -141,9 +150,13 @@ class ReserveService:
                 and now - self.forecast.fetched_at < timedelta(hours=12))
 
     def next_forecast_time(self, now: datetime) -> datetime:
+        return self.next_time(now, self.cfg.forecast_at)
+
+    @staticmethod
+    def next_time(now: datetime, times) -> datetime:
         lt = local(now)
         for days in (0, 1):
-            for at in self.cfg.forecast_at:
+            for at in times:
                 t = datetime.combine(lt.date() + timedelta(days=days), at, KYIV_TZ)
                 if t > lt:
                     return t
@@ -167,6 +180,8 @@ class ReserveService:
         times = [self._next_poll, self._next_replan, self._next_forecast, self._next_load]
         if self.state.verify:
             times.append(self._verify_at())
+        if self._next_solcast is not None:
+            times.append(self._next_solcast)
         if self.event_due is not None:
             times.append(self.event_due)
         return min(times)
@@ -201,6 +216,8 @@ class ReserveService:
             await self.poll_schedule(now)
         if self.state.verify and now >= self._verify_at():
             await self.verify(now)
+        if self._next_solcast is not None and now >= self._next_solcast:
+            await self.refresh_solcast(now)
         reason = None
         if self.event_due is not None:
             # A batch is settling: the replan it brings covers the hourly one and a new forecast too.
@@ -230,6 +247,34 @@ class ReserveService:
         except Exception as e:
             self._next_forecast = now + self.RETRY_INPUT
             logger.warning(f"forecast refresh failed: {type(e).__name__}: {e}")
+
+    async def refresh_solcast(self, now: datetime) -> None:
+        """One Solcast call, within the daily budget; the forecast goes to data/solcast.jsonl."""
+        day = now.astimezone(timezone.utc).date().isoformat()
+        self.state.solcast_calls = {d: n for d, n in self.state.solcast_calls.items() if d >= day}
+        if self.state.solcast_calls.get(day, 0) >= self.cfg.solcast_max_calls:
+            logger.info("Solcast: today's calls are used up")
+            self._next_solcast = self.next_time(now, self.cfg.solcast_at)
+            return
+        self.state.solcast_calls[day] = self.state.solcast_calls.get(day, 0) + 1
+        try:
+            hours = parse_solcast(await self.solcast.forecasts())
+        except Exception as e:
+            # A busy 429 or a failure: one more try in 15 min, if the budget allows.
+            logger.warning(f"Solcast failed: {type(e).__name__}: {e}")
+            self._next_solcast = min(now + self.RETRY_INPUT, self.next_time(now, self.cfg.solcast_at))
+            self._save()
+            return
+        self._next_solcast = self.next_time(now, self.cfg.solcast_at)
+        days = {}
+        for (d, _), (p50, p10, p90) in hours.items():
+            t = days.setdefault(d.isoformat(), [0.0, 0.0, 0.0])
+            t[0], t[1], t[2] = t[0] + p50 / 1000, t[1] + p10 / 1000, t[2] + p90 / 1000
+        self.solcast_log.add("solcast", now, days={d: [round(x, 2) for x in v] for d, v in sorted(days.items())},
+                             hours={f"{d.isoformat()}T{h:02d}": [round(x) for x in v] for (d, h), v in sorted(hours.items())})
+        logger.info("Solcast: " + ", ".join(f"{d[8:10]}.{d[5:7]} {v[0]:.1f} kWh (P10 {v[1]:.1f}, P90 {v[2]:.1f})"
+                                            for d, v in sorted(days.items())[:2]))
+        self._save()
 
     async def refresh_history(self, now: datetime) -> None:
         """Once a day, from one Deye history call: the house's load over the last week, and which
@@ -545,6 +590,9 @@ class ReserveService:
             "forecast_at": self.forecast.fetched_at.isoformat() if self.forecast else None,
             "load_at": self.load.fetched_at.isoformat() if self.load else None,
             "models": self.ranking,
+            "solcast": {"on": self.solcast is not None,
+                        "next": self._next_solcast.isoformat() if self._next_solcast else None,
+                        "calls": self.state.solcast_calls},
             "write": self.cfg.write,
             "writes_today": self.state.writes_on(local(now).date()),
             "deye_calls": getattr(self.deye, "calls", None),
