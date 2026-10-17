@@ -31,9 +31,10 @@ class State:
     seen_stamp: Optional[str] = None            # DTEK's schedule "last updated" seen by the fallback poll
     last_full: Optional[str] = None             # ISO date the battery was last seen at 99%+
     device_sn: Optional[str] = None
-    written_table: Optional[list] = None        # confirmed in the inverter after a write
+    written_table: Optional[list] = None        # taken by the inverter (order status 666)
     writes: dict = field(default_factory=dict)  # ISO date -> write attempts
     last_write: Optional[dict] = None
+    verify: Optional[dict] = None               # a written table the cloud has yet to show: table, order, sent
 
     def writes_on(self, day: date) -> int:
         return int(self.writes.get(day.isoformat(), 0))

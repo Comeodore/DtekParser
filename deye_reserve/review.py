@@ -40,6 +40,10 @@ def decisions(rows: list[dict]) -> list[str]:
             out.append(f"{_hm(_t(row['at']))} WRITE {'ok' if row['ok'] else 'FAILED: ' + row['detail']}"
                        f" order {row.get('order')}: {table_line(table_from_list(row['table']))}")
             continue
+        if row["kind"] == "verify":
+            out.append(f"{_hm(_t(row['at']))} VERIFY order {row.get('order')}: "
+                       + (f"shows in the cloud after {row.get('after_min')} min" if row["ok"] else f"FAILED: {row.get('detail')}"))
+            continue
         if row["kind"] == "message":
             out.append(f"{_hm(_t(row['at']))} MESSAGE day {row.get('day')} ({row.get('outcome')})")
             continue

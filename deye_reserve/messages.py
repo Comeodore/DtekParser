@@ -64,5 +64,8 @@ def render_day(day: date, today: date, report: Report, outcome: tuple[str, str])
     return "\n".join(lines)
 
 
-def render_alarm(table: Sequence[Slot], detail: str) -> str:
-    return f"🚨 <b>Запис TOU не вдався</b>\n{escape(detail)}\nПланувалось: {escape(table_line(table))}"
+def render_alarm(table: Sequence[Slot], detail: str, current: Optional[Sequence[Slot]] = None) -> str:
+    lines = ["🚨 <b>Запис TOU не вдався</b>", escape(detail), "Планувалось:", table_block(table)]
+    if current is not None:
+        lines += ["У інверторі зараз:", table_block(current)]
+    return "\n".join(lines)

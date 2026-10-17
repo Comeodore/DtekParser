@@ -250,21 +250,40 @@ def test_write_request():
     assert parse_tou(items)[0] == table
 
 
-async def test_write_waits_for_the_inverter_and_the_cloud(make):
+async def test_status_666_is_a_write_and_the_cloud_is_checked_after(make):
     service, clock = make(now=T(17, 18), DEYE_RESERVE_WRITE="true")
     await ready(service, clock["now"])
     service.deye.statuses = [100, 300, 666]
+    service.deye.lag = 2                      # /config/tou shows it on the third look (13 min on 17.10)
     report = await service.replan(clock["now"], "test")
     assert len(service.deye.updates) == 1 and service.deye.updates[0]["deviceSn"] == "2511090098"
-    # One message, once the cloud shows the new table.
-    assert len(service.messenger.texts) == 1 and service.messenger.texts[0].endswith("</pre>")    # sent = written
+    # The table goes to the chat as soon as the inverter took it: a table there is a table in the inverter.
+    assert len(service.messenger.texts) == 1 and service.messenger.texts[0].endswith("</pre>")
     assert service.state.written_table == [[s.start, s.soc, s.grid_charge] for s in report.table]
-    assert service.state.writes_on(date(2026, 10, 17)) == 1
-    clock["now"] += timedelta(hours=1)
-    await service.replan(clock["now"], "hourly")
-    assert len(service.deye.updates) == 1 and len(service.messenger.texts) == 1     # already there, nothing to say
-    writes = [r for r in service.journal.read() if r["kind"] == "write"]
-    assert [(w["ok"], w["order"]) for w in writes] == [(True, "9001")]
+    assert service.state.writes_on(date(2026, 10, 17)) == 1 and service.state.verify["order"] == "9001"
+    assert service._verify_at() == T(17, 18, 5) and service.next_due() <= T(17, 18, 5)
+    await service.tick(T(17, 18, 5))                                  # the cloud still shows the old one
+    await service.replan(T(17, 18, 7), "hourly")                      # ...which is no reason to write again
+    await service.tick(T(17, 18, 10))
+    assert service.state.verify is not None
+    await service.tick(T(17, 18, 15))
+    assert service.state.verify is None and len(service.deye.updates) == 1 and len(service.messenger.texts) == 1
+    rows = [(r["kind"], r.get("ok"), r.get("after_min")) for r in service.journal.read() if r["kind"] in ("write", "verify")]
+    assert rows == [("write", True, None), ("verify", True, 15)]
+
+
+async def test_a_table_that_never_shows_up_is_an_alarm(make):
+    service, clock = make(now=T(17, 18), DEYE_RESERVE_WRITE="true")
+    await ready(service, clock["now"])
+    service.deye.lag = 99
+    report = await service.replan(clock["now"], "test")
+    for minute in range(5, 31, 5):
+        await service.tick(T(17, 18, minute))
+    alarm = service.messenger.texts[-1]
+    assert alarm.startswith("🚨 <b>Запис TOU не вдався</b>\nDeye прийняв команду 9001, але за 30 хв таблиця в інверторі не змінилась")
+    assert "Планувалось:\n<pre>00:00" in alarm and "У інверторі зараз:\n<pre>00:00   90%" in alarm
+    assert service.state.verify is None and service.state.written_table is None
+    assert service.write_blocker(report, T(17, 18, 31)).startswith("після помилки чекаю")
 
 
 async def test_failed_write_is_an_alarm(make):
@@ -285,6 +304,7 @@ async def test_failed_write_is_an_alarm(make):
     clock["now"] += timedelta(minutes=31)
     await service.replan(clock["now"], "hourly")
     assert service.messenger.texts[-1].startswith("🚨 <b>Запис TOU не вдався</b>")
+    assert "Планувалось:\n<pre>" in service.messenger.texts[-1]
     assert len(service.deye.updates) == 2
 
 

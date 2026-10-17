@@ -65,8 +65,10 @@ class ReserveService:
     # Writing: how long to wait for the inverter to take the command, then for the cloud to show it.
     ORDER_POLL_S = 5.0
     ORDER_WAIT_S = 90.0
-    CONFIRM_EVERY_S = 60.0
-    CONFIRM_TRIES = 6
+    # Status 666 means the inverter took the table; /config/tou shows it later (13 min on 17.10, during an
+    # outage), so the check runs in the background and alarms only if the table never shows up.
+    VERIFY_EVERY = timedelta(minutes=5)
+    VERIFY_FOR = timedelta(minutes=30)
     WRITE_BACKOFF = timedelta(minutes=30)
 
     def __init__(self, config: Config, sources: Sources, deye: Deye, messenger: Messenger,
@@ -163,6 +165,8 @@ class ReserveService:
 
     def next_due(self) -> datetime:
         times = [self._next_poll, self._next_replan, self._next_forecast, self._next_load]
+        if self.state.verify:
+            times.append(self._verify_at())
         if self.event_due is not None:
             times.append(self.event_due)
         return min(times)
@@ -195,6 +199,8 @@ class ReserveService:
         if now >= self._next_poll:
             self._next_poll = now + timedelta(seconds=self.cfg.poll_s)
             await self.poll_schedule(now)
+        if self.state.verify and now >= self._verify_at():
+            await self.verify(now)
         reason = None
         if self.event_due is not None:
             # A batch is settling: the replan it brings covers the hourly one and a new forecast too.
@@ -436,6 +442,8 @@ class ReserveService:
 
     async def _apply(self, report: Report, now: datetime) -> tuple[str, str]:
         """Gets the table into the inverter: ("already" | "written" | "blocked" | "failed", detail)."""
+        if self.state.verify and self.state.verify["table"] == table_to_list(report.table):
+            return "already", ""        # taken, the cloud has yet to show it
         current = await self.inverter_table(now)
         if current is None and table_to_list(report.table) == self.state.written_table:
             return "already", ""
@@ -451,7 +459,7 @@ class ReserveService:
         return ("written", "") if ok else ("failed", detail)
 
     async def write(self, table: Table) -> tuple[bool, str]:
-        """One command: send, wait for the inverter, then for the cloud to show the new table."""
+        """One command: send it and wait for the inverter's answer; status 666 is a write."""
         async with self._write_lock:
             ok, detail, order_id = False, "", None
             try:
@@ -465,7 +473,7 @@ class ReserveService:
                     detail = (f"команда {order_id}: статус {status}, {ORDER_ERRORS.get(code, code)}".rstrip(", ")
                               if result else f"інвертор не підтвердив команду {order_id} за {self.ORDER_WAIT_S:.0f} с")
                 else:
-                    ok, detail = await self._confirm(sn, table)
+                    ok = True
             except DeyeRateLimited:
                 detail = "Deye Cloud: забагато запитів (429)"
             except (DeyeError, ValueError) as e:
@@ -476,9 +484,9 @@ class ReserveService:
             self.state.last_write = {"at": now.isoformat(), "table": table_to_list(table), "ok": ok, "detail": detail}
             if ok:
                 self.state.written_table = table_to_list(table)
+                self.state.verify = {"table": table_to_list(table), "order": order_id, "sent": now.isoformat()}
                 self._write_blocked_until = None
-                self._tou_cache = (now, table)
-                logger.info("TOU write confirmed")
+                logger.info(f"TOU write done (order {order_id}), checking the cloud shows it")
             else:
                 self._write_blocked_until = now + self.WRITE_BACKOFF
                 logger.error(f"TOU write failed: {detail}")
@@ -497,16 +505,32 @@ class ReserveService:
             await self._sleep(self.ORDER_POLL_S)
             waited += self.ORDER_POLL_S
 
-    async def _confirm(self, sn: str, table: Table) -> tuple[bool, str]:
-        """The cloud shows the new table 1-4 min after the inverter took it; look once a minute, up to 6 min."""
-        current = None
-        for attempt in range(self.CONFIRM_TRIES + 1):
-            if attempt:
-                await self._sleep(self.CONFIRM_EVERY_S)
-            current, _ = await self.deye.read_tou(sn)
-            if tuple(current) == tuple(table):
-                return True, ""
-        return False, f"через 6 хв у інверторі інша таблиця: {table_line(current)}"
+    def _verify_at(self) -> datetime:
+        v = self.state.verify
+        sent = datetime.fromisoformat(v["sent"])
+        return sent + self.VERIFY_EVERY * (int(v.get("checks", 0)) + 1)
+
+    async def verify(self, now: datetime) -> None:
+        """A written table must show up in /config/tou within VERIFY_FOR; otherwise it is an alarm."""
+        v = self.state.verify
+        table = table_from_list(v["table"])
+        sent = datetime.fromisoformat(v["sent"])
+        current = await self.inverter_table(now, fresh=True)
+        if current is not None and tuple(current) == tuple(table):
+            logger.info(f"TOU order {v['order']} shows in the cloud after {(now - sent).total_seconds() / 60:.0f} min")
+            self.journal.add("verify", now, order=v["order"], ok=True, after_min=round((now - sent).total_seconds() / 60))
+            self.state.verify = None
+        elif now - sent >= self.VERIFY_FOR:
+            minutes = round(self.VERIFY_FOR.total_seconds() / 60)
+            detail = f"Deye прийняв команду {v['order']}, але за {minutes} хв таблиця в інверторі не змінилась"
+            logger.error(detail)
+            self.journal.add("verify", now, order=v["order"], ok=False, detail=detail)
+            self.state.verify, self.state.written_table = None, None
+            self._write_blocked_until = now + self.WRITE_BACKOFF
+            await self.messenger.send(render_alarm(table, detail, current))
+        else:
+            v["checks"] = int(v.get("checks", 0)) + 1
+        self._save()
 
     # ---- status ----
 
