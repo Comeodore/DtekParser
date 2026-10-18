@@ -49,18 +49,31 @@ def decisions(rows: list[dict]) -> list[str]:
         if row["kind"] == "message":
             out.append(f"{_hm(_t(row['at']))} MESSAGE day {row.get('day')} ({row.get('outcome')})")
             continue
-        key = (row.get("table"), row.get("fallback"), row.get("outages"), tuple(row.get("outcome") or ()))
+        if row["kind"] == "alert":
+            out.append(f"{_hm(_t(row['at']))} BATTERY ALERT soc {row.get('soc')} at {row.get('load_w')} W, "
+                       f"empty ~{_t(row['empty']):%H:%M}, grid due {_t(row['back']):%H:%M}" if row.get("back") else
+                       f"{_hm(_t(row['at']))} BATTERY ALERT soc {row.get('soc')} at {row.get('load_w')} W, "
+                       f"empty ~{_t(row['empty']):%H:%M}, outage not in the schedule")
+            continue
+        key = (row.get("table"), row.get("tables"), row.get("fallback"), row.get("outages"),
+               tuple(row.get("outcome") or ()))
         key = repr(key)
         if key == last:
             continue
         last = key
         line = f"{_hm(_t(row['at']))} REPLAN ({row['reason']}) soc {row.get('soc')} grid {row.get('grid')}"
         if row.get("fallback"):
-            line += f" FALLBACK: {row['fallback']}"
+            line += f" FALLBACK: {row['fallback']}" + (f" (plan of {_hm(_t(row['kept_from']))} kept)"
+                                                      if row.get("kept_from") else "")
         else:
             line += (f" night {row.get('night')}% safe {row.get('safe')} kept_previous {row.get('kept_previous')}"
                      f" calibration {row.get('calibration')}")
         line += f"\n    table {table_line(table_from_list(row['table']))} -> {row.get('outcome')}"
+        for day, table in (row.get("tables") or {}).items():
+            if table != row["table"]:
+                line += f"\n    table {day[8:10]}.{day[5:7]} {table_line(table_from_list(table))}"
+        if row.get("switch_at"):
+            line += f"; tomorrow's from {_hm(_t(row['switch_at']))}"
         if row.get("outages") is not None:
             outs = ", ".join(f"{_hm(_t(a))}-{_t(b):%H:%M}" for a, b in row["outages"]) or "none"
             line += f"\n    outages {outs}; tomorrow published {row.get('tomorrow_published')} (DTEK {row.get('stamp')})"
@@ -72,8 +85,9 @@ def decisions(rows: list[dict]) -> list[str]:
             line += f"; load mean/safe {row['load_kwh'][0]}/{row['load_kwh'][1]} kWh/day"
         if row.get("expected"):
             e, p = row["expected"], row["pessimistic"]
-            line += (f"\n    expected buy day {e['buy_day']} night {e['buy_night']} kWh, cost* {e['cost_adj']} UAH"
-                     f" (90/45: {row.get('baseline_cost_adj')}), lost sun {e['curtailed']} kWh;"
+            line += (f"\n    expected buy day {e['buy_day']} night {e['buy_night']} kWh, cost* {e['cost_adj']} UAH,"
+                     f" price {row.get('price')} (90/45: {row.get('baseline_price', row.get('baseline_cost_adj'))}),"
+                     f" lost sun {e['curtailed']} kWh;"
                      f" min SOC in outages exp {e['min_by']} pess {p['min_by']}")
             cands = row.get("candidates") or {}
             line += "\n    candidates " + " ".join(
@@ -188,7 +202,7 @@ async def review(end: datetime) -> str:
             day = start.date()
             try:
                 previous = await HttpSources(cfg, session).previous_runs(day, day)
-                models = rank_models(previous, items, cfg.pv_per_ghi, day, day, min_hours=1)
+                models = rank_models(previous, items, cfg.pv_per_gti, day, day, min_hours=1)
             except Exception as e:
                 out.append(f"previous runs failed: {type(e).__name__}: {e}")
                 models = None

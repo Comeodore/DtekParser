@@ -37,7 +37,9 @@ class Config:
     group: str                  # DTEK queue of the house
     latitude: float
     longitude: float
-    pv_per_ghi: float           # PV W per W/m2 of global horizontal irradiance
+    pv_per_gti: float           # PV W per W/m2 of irradiance on the panels' plane
+    tilt: float                 # the panels' plane: degrees from horizontal...
+    azimuth: float              # ...and from south (east negative), as Open-Meteo takes them
     top_models: int             # the sun's median is of this many models that fit the panels best
     rank_days: int              # ...judged over this many days
     host: str
@@ -61,6 +63,10 @@ class Config:
     # Writing
     write: bool
     max_writes_per_day: int
+    # The battery during an outage
+    watch_s: float              # how often the inverter reading is looked at
+    alert_margin_min: float     # the battery must last this long past the scheduled end...
+    alert_unscheduled_h: float  # ...or, in an outage not in the schedule, this long from now
 
 
 def _get(env: Mapping[str, str], key: str, default: Optional[str] = None) -> Optional[str]:
@@ -111,7 +117,8 @@ PARAM_ENV = {
     "SHUTDOWN_SOC": "shutdown_soc", "OUTAGE_MIN_SOC": "outage_min_soc", "DAY_FLOOR": "day_floor",
     "NIGHT_MIN": "night_min", "NIGHT_MAX": "night_max", "DAY_PRICE": "day_price", "NIGHT_PRICE": "night_price",
     "NIGHT_START": "night_start_h", "NIGHT_END": "night_end_h", "SLOT_POWER": "slot_power_w",
-    "SAFETY_LOAD_FACTOR": "safety_load_factor",
+    "SAFETY_LOAD_FACTOR": "safety_load_factor", "CHARGE_EFFICIENCY": "charge_efficiency",
+    "PV_EFFICIENCY": "pv_efficiency", "PV_CHARGE_KW": "pv_charge_kw", "PESS_COST_WEIGHT": "pess_cost_weight",
 }
 
 
@@ -150,7 +157,10 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
         group=_get(env, "DEYE_RESERVE_GROUP", "GPV2.2"),
         latitude=_num(env, "DEYE_RESERVE_LATITUDE", 50.3084),
         longitude=_num(env, "DEYE_RESERVE_LONGITUDE", 30.4067),
-        pv_per_ghi=_num(env, "DEYE_RESERVE_PV_PER_GHI", 5.35),
+        # 4.4 W per W/m2 on the 30-degree south roof is what 5.35 x horizontal was in September-October.
+        pv_per_gti=_num(env, "DEYE_RESERVE_PV_PER_GTI", 4.4),
+        tilt=_num(env, "DEYE_RESERVE_TILT", 30.0),
+        azimuth=_num(env, "DEYE_RESERVE_AZIMUTH", 0.0),
         top_models=_num(env, "DEYE_RESERVE_TOP_MODELS", 3, int),
         rank_days=_num(env, "DEYE_RESERVE_RANK_DAYS", 14, int),
         host=_get(env, "DEYE_RESERVE_HOST", "127.0.0.1"),
@@ -171,4 +181,7 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
         solcast_max_calls=_num(env, "DEYE_RESERVE_SOLCAST_MAX_CALLS", 8, int),
         write=_bool(env, "DEYE_RESERVE_WRITE", False),
         max_writes_per_day=_num(env, "DEYE_RESERVE_MAX_WRITES", 6, int),
+        watch_s=_num(env, "DEYE_RESERVE_WATCH_S", 180.0),
+        alert_margin_min=_num(env, "DEYE_RESERVE_ALERT_MARGIN_MIN", 30.0),
+        alert_unscheduled_h=_num(env, "DEYE_RESERVE_ALERT_UNSCHEDULED_H", 2.0),
     )

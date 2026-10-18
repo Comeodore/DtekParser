@@ -7,7 +7,7 @@ import os
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Optional
+from typing import Mapping, Optional
 
 from deye_reserve.planner import Slot, Table
 
@@ -22,12 +22,21 @@ def table_from_list(data: Optional[list]) -> Optional[Table]:
     return tuple(Slot(int(a), int(b), bool(c)) for a, b, c in data) if data else None
 
 
+def tables_to_dict(tables: Mapping[date, Table]) -> dict[str, list]:
+    return {d.isoformat(): table_to_list(t) for d, t in sorted(tables.items())}
+
+
+def tables_from_dict(data: Optional[dict]) -> Optional[dict[date, Table]]:
+    return {date.fromisoformat(d): table_from_list(t) for d, t in data.items()} if data else None
+
+
 @dataclass
 class State:
-    previous_table: Optional[list] = None       # the last recommended table (it stays unless clearly beaten)
-    sent_table: Optional[list] = None           # what the last message showed
-    sent_status: str = ""
+    previous_tables: dict = field(default_factory=dict)  # the last plan's tables by ISO date (they stay unless clearly beaten)
+    plan_at: Optional[str] = None               # when that plan was made (it is held through a short loss of inputs)
+    sent_tables: dict = field(default_factory=dict)     # the table each day's last message showed, by ISO date
     sent_schedule: dict = field(default_factory=dict)   # our group's slots by ISO date, as last sent
+    alerts: list = field(default_factory=list)  # outages the owner was warned about (battery will not last)
     seen_stamp: Optional[str] = None            # DTEK's schedule "last updated" seen by the fallback poll
     last_full: Optional[str] = None             # ISO date the battery was last seen at 99%+
     device_sn: Optional[str] = None

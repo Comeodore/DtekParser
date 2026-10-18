@@ -31,30 +31,39 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   the building's Elevator and Water Deye inverters, read in the very same
   Deye call as the krem one (`DEYE_BATTERIES`), so they cost no extra quota.
 - **Battery plan (krem), a container of its own: `deye-reserve`.** It works
-  out the Deye inverter's Time of Use table (six slots: start, target SOC,
+  out the Deye inverter's Time of Use tables (six slots: start, target SOC,
   grid charge) for Круглик from the DTEK schedule (queue `DEYE_RESERVE_GROUP`,
-  read from dtek-service on 127.0.0.1:9998), the sun (Open-Meteo: P50 =
-  mean of ECMWF and the median of the three models whose day-ahead
-  forecasts matched the panels best over the last two weeks, pessimistic =
-  min of the ECMWF-ensemble P10 and that median; PV W = 5.35 × GHI) and the
-  house's load (a week). Both come from one Deye history call a day; the
-  model ranking leaves out hours with the battery near full, when zero
-  export holds the panels down. The night target is the
-  cheapest one from 45 to 95% that keeps ≥25% through every outage in the
-  pessimistic case (P80 load ×1.1); by day the battery stays at ≥45% for
-  unscheduled outages, and outages the night charge cannot cover get a
-  grid charge right before them. Once a week the night goes to 100% to
-  keep the SOC calibrated. Without a schedule, a forecast or a fresh
-  inverter reading it falls back to the old 90/45 table. dtek-service
+  read from dtek-service on 127.0.0.1:9998), the sun (Open-Meteo irradiance
+  on the panels' plane, 30° south: P50 = mean of ECMWF and the median of
+  the three models whose day-ahead forecasts matched the panels best over
+  the last two weeks, pessimistic = min of the ECMWF-ensemble P10 and that
+  median; PV W = 4.4 × GTI) and the house's load (a week). Both come from
+  one Deye history call a day; the model ranking leaves out hours with the
+  battery near full, when zero export holds the panels down. Today and
+  tomorrow are planned together, with a table per day (tomorrow's charges
+  in tomorrow's table), simulated with the battery's measured charge and
+  discharge losses. The night target is the cheapest one from 45 to 95%
+  (priced 70% on the expected case, 30% on the pessimistic one) that keeps
+  ≥25% through every outage in the pessimistic case (P80 load ×1.1); by
+  day the battery stays at ≥45% for unscheduled outages, and outages the
+  night charge cannot cover get a grid charge right before them. Once a
+  week the night goes to 100% to keep the SOC calibrated. Without a
+  schedule, a forecast or a fresh inverter reading it holds the last plan
+  for up to 6 h, then falls back to the old 90/45 table. dtek-service
   posts to it when krem's schedule data changes and when the inverter
   loses or regains the grid (`DEYE_RESERVE_URL`, `/api/v1/inverter/latest`
   gives it SOC and grid); it replans 2.5 min after such an event (batches),
-  polls the schedule every 10 min as a fallback, replans hourly and after
-  the 05:30 and 22:00 forecast refresh. The owner's own chat
-  (`DEYE_RESERVE_CHAT_ID`, through the krem bot) hears about it
-  only for a day whose DTEK schedule was published or changed: that day's
-  final table, sent once it is in the inverter (a line is added only when
-  it is not), plus an alarm when a write fails. With
+  polls the schedule every 10 min as a fallback, replans hourly, after
+  the 05:30 and 22:00 forecast refresh, and when tomorrow's table takes
+  over (23:00, or earlier once it does the same as today's for the rest of
+  the day). The owner's own chat (`DEYE_RESERVE_CHAT_ID`, through the krem
+  bot) hears about a day whose DTEK schedule was published, or changed so
+  that the day's table changed: that day's final table, sent once it is in
+  the inverter (a line is added only when it is not; tomorrow's says when
+  it goes in), plus an alarm when a write fails. During an outage the
+  inverter reading is looked at every 3 min, and the owner is warned once
+  when at the present load the battery will not last until the grid is due
+  back. With
   `DEYE_RESERVE_WRITE=true` each replan writes a changed table straight
   away (`/order/sys/tou/update` with 120 s for the inverter to answer;
   order status 666 means it is written, `/config/tou` is not read back),

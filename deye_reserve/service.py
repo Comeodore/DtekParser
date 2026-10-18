@@ -6,14 +6,18 @@ Replans happen
   push it on, but never past 5 min after the first;
 - when the fallback poll of dtek-service's schedule (every 10 min) sees a
   new DTEK "last updated" stamp the webhook did not deliver;
-- every hour, and after each forecast refresh (05:30 and 22:00).
+- every hour, after each forecast refresh (05:30 and 22:00), and when
+  tomorrow's table takes over (23:00, or earlier when nothing of today's
+  differs from it any more).
 
 With DEYE_RESERVE_WRITE=true each replan also gets the table into the
 inverter when it differs, straight away, outage or not. The owner hears
-only about a day whose DTEK schedule was published or changed: that day's
-final table, sent once it is in the inverter (a line says so only when it
-is not); and about a write that failed. The reasons behind every
-decision go to the journal (data/journal.jsonl), for the daily review.
+about a day whose DTEK schedule was published, or changed so that the day's
+table changed: that day's final table, sent once it is in the inverter (a
+line says so only when it is not); about a write that failed; and, during an
+outage, when the battery will not last until the grid is due back at the
+house's present load. The reasons behind every decision go to the journal
+(data/journal.jsonl), for the daily review.
 """
 from __future__ import annotations
 
@@ -28,9 +32,10 @@ from deye_reserve.deye import ORDER_DONE, ORDER_ERRORS, ORDER_FINAL, DeyeError, 
 from deye_reserve.inputs import (Forecast, InputError, LoadProfile, Schedule, changed_days, combine_forecast,
                                  load_profile, parse_schedule, parse_solcast, rank_models)
 from deye_reserve.journal import Journal
-from deye_reserve.messages import Report, render_alarm, render_day, table_line
-from deye_reserve.planner import Inputs, Planner, Table, local, safe_table, window
-from deye_reserve.state import load_state, read_json, save_state, table_from_list, table_to_list, write_json
+from deye_reserve.messages import Report, render_alarm, render_battery, render_days, table_line
+from deye_reserve.planner import Inputs, Planner, Table, local, safe_table, table_now, window
+from deye_reserve.state import (load_state, read_json, save_state, table_to_list, tables_from_dict, tables_to_dict,
+                                write_json)
 from deye_reserve.timeutil import KYIV_TZ, now_kyiv
 
 logger = logging.getLogger(__name__)
@@ -75,6 +80,10 @@ class ReserveService:
     WRITE_ATTEMPTS = 4
     RETRY_AFTER_S = 300.0
     WRITE_BACKOFF = timedelta(minutes=30)
+    # Without a fresh plan (no schedule, forecast or reading) the last one is held this long, then 90/45.
+    KEEP_PLAN = timedelta(hours=6)
+    # The battery watch during an outage: the load is the mean of this window of readings.
+    WATCH_WINDOW = timedelta(minutes=30)
 
     def __init__(self, config: Config, sources: Sources, deye: Deye, messenger: Messenger,
                  clock=now_kyiv, sleep=asyncio.sleep, solcast: Optional[SolcastSource] = None):
@@ -114,6 +123,10 @@ class ReserveService:
         self._forecast_new = False
         self._write_lock = asyncio.Lock()
         self._write_blocked_until: Optional[datetime] = None
+        self._next_switch: Optional[datetime] = None       # tomorrow's table takes over
+        self._next_watch = now
+        self._readings: list[tuple[datetime, float, float]] = []    # (at, load W, PV W)
+        self._off_since: Optional[datetime] = None
 
     # ---- caches ----
 
@@ -177,7 +190,9 @@ class ReserveService:
         return self.event_due
 
     def next_due(self) -> datetime:
-        times = [self._next_poll, self._next_replan, self._next_forecast, self._next_load]
+        times = [self._next_poll, self._next_replan, self._next_forecast, self._next_load, self._next_watch]
+        if self._next_switch is not None:
+            times.append(self._next_switch)
         if self._next_solcast is not None:
             times.append(self._next_solcast)
         if self.event_due is not None:
@@ -214,12 +229,16 @@ class ReserveService:
             await self.poll_schedule(now)
         if self._next_solcast is not None and now >= self._next_solcast:
             await self.refresh_solcast(now)
+        if now >= self._next_watch:
+            await self.watch(now)
         reason = None
         if self.event_due is not None:
             # A batch is settling: the replan it brings covers the hourly one and a new forecast too.
             if now >= self.event_due:
                 reason = "події: " + ", ".join(dict.fromkeys(self._events))
                 self._events, self._first_event, self.event_due = [], None, None
+        elif self._next_switch is not None and now >= self._next_switch:
+            reason = "таблиця на завтра"
         elif self._forecast_new:
             reason = "новий прогноз"
         elif now >= self._next_replan:
@@ -234,7 +253,7 @@ class ReserveService:
     async def refresh_forecast(self, now: datetime) -> None:
         try:
             multi, ensemble = await self.sources.weather()
-            self.forecast = combine_forecast(multi, ensemble, self.cfg.pv_per_ghi, now, self.top_models,
+            self.forecast = combine_forecast(multi, ensemble, self.cfg.pv_per_gti, now, self.top_models,
                                              self.cfg.top_models)
             write_json(self.cfg.data_dir / "forecast.json", self.forecast.to_dict())
             self._forecast_new = True
@@ -293,7 +312,7 @@ class ReserveService:
             return
         try:
             first = local(start).date()
-            scores = rank_models(await self.sources.previous_runs(first, today), items, self.cfg.pv_per_ghi,
+            scores = rank_models(await self.sources.previous_runs(first, today), items, self.cfg.pv_per_gti,
                                  first, today)
         except Exception as e:
             logger.warning(f"model ranking failed: {type(e).__name__}: {e}")
@@ -372,21 +391,32 @@ class ReserveService:
         if report.fallback is None:
             inputs = Inputs(now, float(reading["soc"]), schedule.outages, self.load.mean, self.load.p80,
                             self.forecast.p50, self.forecast.pess, self.calibrate(now))
-            plan = self.planner.plan(inputs, table_from_list(self.state.previous_table))
-            report.plan, report.table = plan, plan.table
+            plan = self.planner.plan(inputs, tables_from_dict(self.state.previous_tables))
+            report.plan, report.table, report.tables, report.switch_at = plan, plan.table, plan.tables, plan.switch_at
+            self.state.previous_tables, self.state.plan_at = tables_to_dict(plan.tables), now.isoformat()
             if local(end).date() > local(now).date() and not schedule.tomorrow_published:
                 report.notes.append("Графік на завтра ще не опубліковано: план без відключень завтра, "
                                     "перерахую, щойно з'явиться")
             if not schedule.group_found:
                 report.notes.append(f"У графіку немає черги {self.cfg.group}: беру всі лінії будинку")
+        else:
+            kept = tables_from_dict(self.state.previous_tables)
+            planned = datetime.fromisoformat(self.state.plan_at) if self.state.plan_at else None
+            if kept and planned is not None and now - planned <= self.KEEP_PLAN:
+                # A short loss of an input: the last plan is better than the safe table.
+                report.tables, report.kept_from = kept, planned
+                report.table, report.switch_at = table_now(kept, now)
+            else:
+                report.tables = {d: report.table for d in days}
         if report.grid_present is False and schedule is not None and \
                 not any(a <= now < b for a, b in schedule.outages):
             report.notes.append("Мережі немає поза графіком")
-        changed = table_to_list(report.table) != self.state.previous_table
-        self.state.previous_table = table_to_list(report.table)
+        self._next_switch = report.switch_at if report.switch_at is not None and report.switch_at > now else None
+        changed = table_to_list(report.table) != self.state.written_table
         self.report, self.last_replan = report, now
-        logger.info(f"plan {'changed' if changed else 'unchanged'}: {table_line(report.table)}"
-                    + (f" (fallback: {report.fallback})" if report.fallback else ""))
+        logger.info(f"plan {'differs from the inverter' if changed else 'as in the inverter'}: {table_line(report.table)}"
+                    + (f" (fallback: {report.fallback}" + (", last plan kept" if report.kept_from else "") + ")"
+                       if report.fallback else ""))
         outcome = await self._apply(report, now) if self.cfg.write else ("off", "")
         self._journal_replan(report, reason, outcome)
         await self._tell(report, schedule, now, outcome)
@@ -395,24 +425,41 @@ class ReserveService:
 
     async def _tell(self, report: Report, schedule: Optional[Schedule], now: datetime,
                     outcome: tuple[str, str]) -> None:
-        """A day whose schedule was published or changed gets its final table; a failed write an alarm."""
+        """A day whose schedule was published, or changed so that its table changed, gets its final table;
+        a failed write with no such news gets an alarm."""
         today = local(now).date()
         days = changed_days(self.state.sent_schedule, schedule.days, today) if schedule is not None else []
-        if days:
-            day = max(days)         # tomorrow's publication is the news when both changed
-            if await self.messenger.send(render_day(day, today, report, outcome)):
-                self.state.sent_schedule = {d.isoformat(): list(s) for d, s in schedule.days.items()}
-                self.state.sent_table = table_to_list(report.table)
-                self.journal.add("message", now, day=day.isoformat(), outcome=outcome[0])
+        news = []
+        for day in days:
+            table = report.tables.get(day)
+            if table is None:
+                continue
+            first = day.isoformat() not in self.state.sent_tables
+            if first or self.state.sent_tables[day.isoformat()] != table_to_list(table):
+                news.append(day)
+        delivered = True
+        if news:
+            delivered = await self.messenger.send(render_days(news, today, report, outcome))
+            if delivered:
+                for day in news:
+                    self.state.sent_tables[day.isoformat()] = table_to_list(report.tables[day])
+                for day in news:
+                    self.journal.add("message", now, day=day.isoformat(), outcome=outcome[0])
         elif outcome[0] == "failed":
             await self.messenger.send(render_alarm(report.table, outcome[1]))
             self.journal.add("message", now, day=None, outcome="failed")
+        if days and delivered:
+            self.state.sent_schedule = {d.isoformat(): list(s) for d, s in schedule.days.items()}
+            self.state.sent_tables = {d: t for d, t in self.state.sent_tables.items() if d >= today.isoformat()}
 
     def _journal_replan(self, report: Report, reason: str, outcome: tuple[str, str]) -> None:
         now = report.now
         today = local(now).date()
         row = {"reason": reason, "fallback": report.fallback, "soc": report.soc, "grid": report.grid_present,
-               "table": table_to_list(report.table), "outcome": list(outcome), "notes": report.notes}
+               "table": table_to_list(report.table), "tables": tables_to_dict(report.tables),
+               "switch_at": report.switch_at.isoformat() if report.switch_at else None,
+               "kept_from": report.kept_from.isoformat() if report.kept_from else None,
+               "outcome": list(outcome), "notes": report.notes}
         if report.schedule is not None:
             row.update(outages=[[a.isoformat(), b.isoformat()] for a, b in report.schedule.outages],
                        tomorrow_published=report.schedule.tomorrow_published, stamp=report.schedule.updated)
@@ -437,12 +484,70 @@ class ReserveService:
                         "min_by": {p.outages[k][0].isoformat(): round(v, 1) for k, v in s.min_by.items()}}
             row.update(night=p.night, safe=p.safe, kept_previous=p.kept_previous, calibration=p.calibration,
                        window=[p.start.isoformat(), p.end.isoformat()], expected=sim(p.expected),
-                       pessimistic=sim(p.pessimistic),
+                       pessimistic=sim(p.pessimistic), price=round(p.price, 2),
                        baseline_cost_adj=round(p.baseline.expected.cost_adj, 2) if p.baseline else None,
+                       baseline_price=round(p.baseline.price, 2) if p.baseline else None,
                        candidates={n: [s, round(c, 2), round(lo, 1)] for n, (s, c, lo) in p.candidates.items()},
                        soc_expected={local(t).strftime("%d.%m %H:%M"): round(v, 1)
                                      for t, v in p.expected.soc_at.items()})
         self.journal.add("replan", now, **row)
+
+    # ---- the battery during an outage ----
+
+    async def watch(self, now: datetime) -> None:
+        """A reading every few minutes; without the grid, a warning when at the present load the battery
+        will not last until the grid is due back (the scheduled end plus a margin, or a while when the
+        outage is not in the schedule). Once per outage, and again if DTEK moves its end."""
+        self._next_watch = now + timedelta(seconds=self.cfg.watch_s)
+        try:
+            reading = (await self.sources.inverter()).get("reading")
+        except Exception as e:
+            logger.warning(f"inverter reading failed: {type(e).__name__}: {e}")
+            return
+        if not reading or reading.get("soc") is None or not reading.get("at"):
+            return
+        at = datetime.fromisoformat(reading["at"])
+        if now - at > self.READING_MAX_AGE:
+            return
+        if not self._readings or self._readings[-1][0] != at:
+            self._readings.append((at, float(reading.get("load_w") or 0), float(reading.get("pv_w") or 0)))
+        self._readings = [r for r in self._readings if r[0] >= now - self.WATCH_WINDOW]
+        if reading.get("grid_present") is not False:
+            self._off_since = None
+            return
+        self._off_since = self._off_since or at
+        net = sum(max(0.0, load - pv) for _, load, pv in self._readings) / len(self._readings)
+        soc = float(reading["soc"])
+        if net < 50:
+            return
+        p = self.p
+        hours = max(0.0, soc - p.shutdown_soc) / 100 * p.capacity_kwh * p.efficiency / (net / 1000)
+        empty = at + timedelta(hours=hours)
+        outage = await self._scheduled_outage(now)
+        if outage is not None:
+            back, key = outage[1], f"{outage[0].isoformat()}/{outage[1].isoformat()}"
+            until = back + timedelta(minutes=self.cfg.alert_margin_min)
+        else:
+            back, key = None, f"off/{self._off_since.isoformat()}"
+            until = now + timedelta(hours=self.cfg.alert_unscheduled_h)
+        if empty >= until or key in self.state.alerts:
+            return
+        if await self.messenger.send(render_battery(soc, net, empty, back)):
+            self.state.alerts = (self.state.alerts + [key])[-20:]
+            self.journal.add("alert", now, soc=soc, load_w=round(net), empty=empty.isoformat(),
+                             back=back.isoformat() if back else None, key=key)
+            logger.warning(f"battery alert: {soc:.0f}% at {net:.0f} W lasts until {local(empty):%H:%M}")
+            self._save()
+
+    async def _scheduled_outage(self, now: datetime):
+        """The scheduled outage the house is in now (one that should have started up to 30 min ago counts)."""
+        try:
+            schedule = parse_schedule(await self.sources.schedule(), self.cfg.group, now,
+                                      timedelta(hours=self.cfg.schedule_max_age_h))
+        except Exception as e:
+            logger.info(f"battery watch without a schedule: {type(e).__name__}: {e}")
+            return None
+        return next(((a, b) for a, b in schedule.outages if a - timedelta(minutes=30) <= now < b), None)
 
     async def device_sn(self) -> str:
         if self.cfg.device_sn:
@@ -559,6 +664,8 @@ class ReserveService:
                         "calls": self.state.solcast_calls},
             "write": self.cfg.write,
             "writes_today": self.state.writes_on(local(now).date()),
+            "next_switch": self._next_switch.isoformat() if self._next_switch else None,
+            "watch": {"readings": len(self._readings), "off_since": self._off_since.isoformat() if self._off_since else None},
             "deye_calls": getattr(self.deye, "calls", None),
         }
 
@@ -567,6 +674,9 @@ class ReserveService:
         if r is None:
             return None
         body = {"at": r.now.isoformat(), "table": [s.__dict__ for s in r.table], "fallback": r.fallback,
+                "tables": {d.isoformat(): [s.__dict__ for s in t] for d, t in sorted(r.tables.items())},
+                "switch_at": r.switch_at.isoformat() if r.switch_at else None,
+                "kept_from": r.kept_from.isoformat() if r.kept_from else None,
                 "soc": r.soc, "grid_present": r.grid_present, "notes": r.notes}
         if r.plan is not None:
             p = r.plan
@@ -576,7 +686,7 @@ class ReserveService:
                         expected={k: v for k, v in asdict(p.expected).items() if k not in ("soc_at",)},
                         pessimistic={k: v for k, v in asdict(p.pessimistic).items() if k not in ("soc_at",)},
                         soc_expected={local(t).strftime("%d.%m %H:%M"): round(v, 1) for t, v in p.expected.soc_at.items()},
-                        candidates={n: {"safe": s, "cost": round(c, 2), "lowest": round(lo, 1)}
+                        candidates={n: {"safe": s, "price": round(c, 2), "lowest": round(lo, 1)}
                                     for n, (s, c, lo) in p.candidates.items()})
         return body
 

@@ -145,9 +145,14 @@ def _median(values: list[float]) -> float:
     return statistics.median(values)
 
 
-def combine_forecast(multi: dict, ensemble: Optional[dict], pv_per_ghi: float, fetched_at: datetime,
+def combine_forecast(multi: dict, ensemble: Optional[dict], pv_factor: float, fetched_at: datetime,
                      ranking: Optional[Sequence[str]] = None, top: int = 3) -> Forecast:
     """P50 and pessimistic PV per hour from Open-Meteo's multi-model and ECMWF-ensemble answers.
+
+    The radiation is whatever the answers carry, PV W = pv_factor x W/m2: the
+    service asks for irradiance on the panels' plane (global_tilted_irradiance),
+    which follows the low winter sun that horizontal radiation misses (on clear
+    December days the roof gets ~1.8x the horizontal, in October ~1.3x).
 
     Backtest 23.08-16.10 (day-ahead vs satellite): ECMWF IFS had the lowest
     error, the median of models never mixed up dark, mixed and sunny days,
@@ -204,8 +209,8 @@ def combine_forecast(multi: dict, ensemble: Optional[dict], pv_per_ghi: float, f
                 vals = sorted(v[j] for v in members.values() if v[j] is not None)
                 if vals:
                     low = min(vals[min(int(len(vals) * 0.1), len(vals) - 1)], med)
-            p50[key] = mid * pv_per_ghi
-            pess[key] = low * pv_per_ghi
+            p50[key] = mid * pv_factor
+            pess[key] = low * pv_factor
     if not p50:
         raise InputError("у прогнозі Open-Meteo немає повних днів")
     return Forecast(p50, pess, fetched_at, bool(members), used)
@@ -217,11 +222,15 @@ def combine_forecast(multi: dict, ensemble: Optional[dict], pv_per_ghi: float, f
 FULL_SOC = 95.0
 
 
+RADIATION = ("global_tilted_irradiance", "shortwave_radiation")
+
+
 def model_name(key: str) -> str:
-    """shortwave_radiation_previous_day1_ecmwf_ifs025 / shortwave_radiation_ecmwf_ifs025 -> ecmwf_ifs025."""
-    for prefix in ("shortwave_radiation_previous_day1_", "shortwave_radiation_"):
-        if key.startswith(prefix):
-            return key[len(prefix):]
+    """global_tilted_irradiance_previous_day1_ecmwf_ifs025 / ..._ecmwf_ifs025 -> ecmwf_ifs025 (horizontal alike)."""
+    for variable in RADIATION:
+        for prefix in (f"{variable}_previous_day1_", f"{variable}_"):
+            if key.startswith(prefix):
+                return key[len(prefix):]
     return key
 
 
@@ -233,11 +242,11 @@ class ModelScore:
     hours: int
 
 
-def rank_models(previous: dict, items: list[dict], pv_per_ghi: float, first: date, last: date,
+def rank_models(previous: dict, items: list[dict], pv_factor: float, first: date, last: date,
                 min_hours: int = 30) -> list[ModelScore]:
     """Models by how well their day-ahead forecast matched what the panels gave, best first.
 
-    `previous` is Open-Meteo's previous-runs answer (shortwave_radiation_previous_day1 per model),
+    `previous` is Open-Meteo's previous-runs answer (global_tilted_irradiance_previous_day1 per model),
     `items` Deye's station history. An hour counts when the logger covered it and the battery
     stayed below FULL_SOC all through it, and it had sun in the forecast or on the panels.
     """
@@ -261,7 +270,7 @@ def rank_models(previous: dict, items: list[dict], pv_per_ghi: float, first: dat
             got = actual.get((t.date(), t.hour))
             if value is None or got is None:
                 continue
-            forecast = value * pv_per_ghi
+            forecast = value * pv_factor
             if forecast < 20 and got < 20:
                 continue        # night
             errors.append(abs(forecast - got))

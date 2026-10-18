@@ -2,10 +2,13 @@
 import bisect
 from datetime import date, datetime
 
+from dataclasses import replace
+
 import pytest
 
 from deye_reserve.inputs import combine_forecast, load_profile
-from deye_reserve.planner import Inputs, Params, Planner, Slot, local, pad, profile_table, safe_table, simulate, window
+from deye_reserve.planner import (Inputs, Params, Planner, Slot, local, pad, profile_table, safe_table, simulate,
+                                  table_now, window)
 from deye_reserve.timeutil import KYIV_TZ
 from tests.conftest import fixture
 
@@ -22,11 +25,11 @@ def day_ahead(name="openmeteo_previous_day1_best_match_20261013_18.json"):
     return combine_forecast(fixture(name), None, 5.35, T(13, 0))
 
 
-def plan_for(now, soc, outages, profile_days, forecast=None, **kw):
+def plan_for(now, soc, outages, profile_days, forecast=None, params=P, **kw):
     load = load_profile(HISTORY, date(2026, 10, profile_days[0]), date(2026, 10, profile_days[1]), now)
     forecast = forecast or day_ahead()
     inputs = Inputs(now, soc, tuple(outages), load.mean, load.p80, forecast.p50, forecast.pess, **kw)
-    return Planner(P).plan(inputs)
+    return Planner(params).plan(inputs)
 
 
 def actual(day):
@@ -87,15 +90,46 @@ def test_sunny_14_10_leaves_room_for_the_sun():
     assert plan.expected.cost_adj < plan.baseline.expected.cost_adj - 5
 
 
-def test_two_outages_in_a_row_charge_before_the_second():
-    # 16.10's final schedule, cloudy: the morning outage drains the battery, the evening one needs a top-up.
+def test_two_outages_in_a_row_are_carried_by_the_night_charge():
+    # 16.10's final schedule, cloudy: priced partly by the pessimistic case, a high night target carries both
+    # outages, cheaper than topping up at the day tariff before the evening one.
     plan = plan_for(T(15, 23), 66, [(T(16, 9), T(16, 15)), (T(16, 18), T(17, 0))], (9, 15))
     assert plan.safe and lowest_in_outages(plan) >= P.outage_min_soc
-    charges = day_charges(plan.table)
-    assert len(charges) == 1
-    start, end, soc = charges[0]
+    assert plan.night >= 85 and day_charges(plan.table) == []
+
+
+def test_a_charge_for_tomorrow_is_in_tomorrows_table_only():
+    # The same night with the night target capped at 60%: the evening outage needs a top-up on 16.10, and
+    # only 16.10's table has it.
+    plan = plan_for(T(15, 23), 66, [(T(16, 9), T(16, 15)), (T(16, 18), T(17, 0))], (9, 15),
+                    params=replace(P, night_max=60))
+    assert plan.safe and lowest_in_outages(plan) >= P.outage_min_soc
+    today, tomorrow = plan.tables[date(2026, 10, 15)], plan.tables[date(2026, 10, 16)]
+    assert day_charges(today) == []
+    (start, end, soc), = day_charges(tomorrow)
     assert end == "18:00" and "15:00" <= start < "18:00" and soc > P.day_floor
-    assert [s.time for s in plan.table][0] == "00:00" and len(plan.table) == 6
+    assert all(len(t) == 6 and t[0].start == 0 for t in plan.tables.values())
+    # Past 18:00 on the 15th the two tables do the same, so tomorrow's is the one to hold at 23:00.
+    assert plan.switch_at == T(15, 18) and plan.table == tomorrow
+
+
+def test_tomorrows_table_waits_until_it_changes_nothing_today():
+    # Planned at 10:00 for a 17:00 outage tomorrow: a charge at 15:30 written now would also run today.
+    plan = plan_for(T(16, 10), 60, [(T(17, 17), T(18, 0))], (9, 15), params=replace(P, night_max=60))
+    tomorrow = plan.tables[date(2026, 10, 17)]
+    (start, end, soc), = day_charges(tomorrow)
+    assert end == "17:00" and plan.table == plan.tables[date(2026, 10, 16)] and day_charges(plan.table) == []
+    assert plan.switch_at == T(16, 17)
+    assert table_now(plan.tables, T(16, 16, 59))[0] != tomorrow and table_now(plan.tables, T(16, 17))[0] == tomorrow
+
+
+def test_the_simulation_takes_each_days_table():
+    today, tomorrow = safe_table(P, night=60), safe_table(P, night=60)[:3] + (Slot(900, 90, True),) + safe_table(P)[4:]
+    load = lambda t: 300                                                   # noqa: E731
+    one = simulate({date(2026, 10, 16): today, date(2026, 10, 17): tomorrow}, T(16, 14), T(17, 18), 60, load,
+                   lambda t: 0, [], P)
+    assert one.soc_at[T(16, 22)] == pytest.approx(45, abs=0.5)            # no charge on the 16th
+    assert one.soc_end > 85                                                # the 17th's 15:00 charge
 
 
 def test_outage_from_23_00_is_charged_for_before_the_night_tariff():
@@ -135,7 +169,7 @@ def test_previous_table_stays_unless_clearly_beaten():
     again = Planner(P).plan(Inputs(T(13, 23, 30), 74, (), load.mean, load.p80, fc.p50, fc.pess), previous=nearly)
     assert again.table == nearly and again.kept_previous           # 5% more costs less than the margin
     old = Planner(P).plan(Inputs(T(13, 23, 30), 74, (), load.mean, load.p80, fc.p50, fc.pess), previous=safe_table(P))
-    assert old.table == first.table and not old.kept_previous     # 90% on a sunny day: clearly beaten
+    assert old.night <= first.night and not old.kept_previous     # 90% on a sunny day: clearly beaten
 
 
 def test_window_runs_to_23_00_of_the_coming_nights_day():

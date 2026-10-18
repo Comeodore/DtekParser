@@ -9,6 +9,7 @@ from deye_reserve.config import ConfigError, load_config
 from deye_reserve.deye import parse_tou, tou_request
 from deye_reserve.inputs import (InputError, changed_days, combine_forecast, parse_schedule, parse_solcast,
                                  rank_models)
+from deye_reserve.net import HttpSources
 from deye_reserve.planner import Params, Slot, safe_table
 from deye_reserve.review import actual, decisions, solcast_lines
 from deye_reserve.service import ReserveService
@@ -25,6 +26,8 @@ ENV = {
     "DEYE_DEVICE_SN": "2511090098",
     "BOT_SCHEDULEBOT_TOKEN": "2:b",
     "DEYE_RESERVE_CHAT_ID": "370921204",
+    # The Open-Meteo fixtures of 17.10 are horizontal radiation, with the factor the panels had for it then.
+    "DEYE_RESERVE_PV_PER_GTI": "5.35",
 }
 SCHEDULE = fixture("krem_schedule_api_20261017.json")      # 17.10 15:23: power off 00-01 and 15-17, tomorrow unknown
 MAX_AGE = timedelta(hours=3)
@@ -414,8 +417,10 @@ async def test_http_endpoints(make):
 
 
 def test_config_defaults_and_checks():
-    cfg = load_config(ENV)
+    cfg = load_config({k: v for k, v in ENV.items() if k != "DEYE_RESERVE_PV_PER_GTI"})
     assert (cfg.write, cfg.port, cfg.host, cfg.group, cfg.chat_id) == (False, 9997, "127.0.0.1", "GPV2.2", "370921204")
+    assert (cfg.pv_per_gti, cfg.tilt, cfg.azimuth) == (4.4, 30.0, 0.0)
+    assert (cfg.watch_s, cfg.alert_margin_min, cfg.alert_unscheduled_h) == (180.0, 30.0, 2.0)
     assert cfg.params == Params() and cfg.debounce_s == 150 and cfg.max_writes_per_day == 6
     assert [t.isoformat() for t in cfg.forecast_at] == ["05:30:00", "22:00:00"]
     assert load_config({**ENV, "DEYE_RESERVE_CHARGE_KW": "3.1", "DEYE_RESERVE_NIGHT_MAX": "90"}).params.charge_kw == 3.1
@@ -558,3 +563,142 @@ def test_review_puts_solcast_next_to_the_panels():
     assert lines[0].startswith("panels 16.10: 1.7") and "hours usable" in lines[0]
     assert lines[1].startswith("solcast day-ahead (15.10 22:04): P50 2.4 / P10 1.1 / P90 3.9 kWh; hourly error ")
     assert lines[2] == "solcast morning (15.10 22:04): P50 2.4 / P10 1.1 / P90 3.9 kWh; hourly error " + lines[1].split("hourly error ")[1]
+
+
+# ---- the sun on the panels' plane ----
+
+def test_the_sun_is_irradiance_on_the_panels_plane():
+    multi, ens = fixture("openmeteo_gti_models_20261019.json"), fixture("openmeteo_gti_ensemble_20261019.json")
+    top = ["ukmo_seamless", "ecmwf_ifs025", "meteofrance_seamless"]
+    fc = combine_forecast(multi, ens, 4.4, T(19, 0), top, 3)
+    h = multi["hourly"]
+    i = h["time"].index("2026-10-19T13:00")
+    med = sorted(h[f"global_tilted_irradiance_{m}"][i] for m in top)[1]
+    assert fc.ensemble and fc.models[date(2026, 10, 19)] == top
+    assert fc.p50[(date(2026, 10, 19), 12)] == pytest.approx((med + h["global_tilted_irradiance_ecmwf_ifs025"][i]) / 2 * 4.4)
+    members = sorted(v[i] for k, v in ens["hourly"].items() if k != "time")
+    assert fc.pess[(date(2026, 10, 19), 12)] == pytest.approx(min(members[5], med) * 4.4)
+    # The models are ranked on the same plane, by name.
+    history = fixture("deye_history_power_20261009_17.json")["stationDataItems"]
+    scores = rank_models(fixture("openmeteo_gti_previous_day1_20261013_17.json"), history, 4.4,
+                         date(2026, 10, 13), date(2026, 10, 17))
+    assert len(scores) == 7 and {s.model for s in scores} >= {"ecmwf_ifs025", "icon_seamless", "cma_grapes_global"}
+
+
+async def test_open_meteo_is_asked_for_the_roof():
+    asked = []
+
+    class Answer:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def json(self, content_type=None):
+            return {}
+
+    class Session:
+        def get(self, url, params=None):
+            asked.append((url, params))
+            return Answer()
+
+    sources = HttpSources(load_config(ENV), Session())
+    await sources.weather()
+    await sources.previous_runs(date(2026, 10, 13), date(2026, 10, 17))
+    assert [p["hourly"] for _, p in asked] == ["global_tilted_irradiance", "global_tilted_irradiance",
+                                               "global_tilted_irradiance_previous_day1"]
+    assert all((p["tilt"], p["azimuth"]) == (30.0, 0.0) for _, p in asked)
+
+
+# ---- a table per day ----
+
+async def plan_with_tomorrow(make, now, **env):
+    """17.10 with tomorrow out 16:00-24:00 and the night target capped at 60%: tomorrow needs a top-up at 14:15."""
+    service, clock = make(now=now, DEYE_RESERVE_NIGHT_MAX="60", **env)
+    service.sources.payload = with_tomorrow(service.sources.payload, set(range(16, 24)))
+    service.sources.reading = {"soc": 50.0, "grid_present": True}
+    await ready(service, clock["now"])
+    return service, clock, await service.replan(clock["now"], "test")
+
+
+async def test_tomorrows_table_goes_in_when_it_changes_nothing_today(make):
+    service, clock, report = await plan_with_tomorrow(make, T(17, 12), DEYE_RESERVE_WRITE="true")
+    today, tomorrow = report.tables[date(2026, 10, 17)], report.tables[date(2026, 10, 18)]
+    assert any(s.grid_charge and 600 < s.start < 960 for s in tomorrow) and not any(
+        s.grid_charge and 420 <= s.start < 1380 for s in today)
+    assert report.table == today and report.switch_at == T(17, 16)
+    assert service.state.written_table == [[s.start, s.soc, s.grid_charge] for s in today]
+    # The chat shows both days' own tables; tomorrow's says when it goes in.
+    text = service.messenger.texts[0]
+    assert text.startswith("🔋 <b>Таблиця TOU на сьогодні, 17.10</b>")
+    assert "\n\n🔋 <b>Таблиця TOU на завтра, 18.10</b>\n<pre>" in text and text.endswith("⏭ Застосую о 16:00")
+    assert service.next_due() <= T(17, 16)
+    clock["now"] = T(17, 16)
+    await service.tick(clock["now"])
+    assert service.last_replan == T(17, 16) and service.journal.read()[-1]["reason"] == "таблиця на завтра"
+    assert service.state.written_table == [[s.start, s.soc, s.grid_charge] for s in service.report.tables[date(2026, 10, 18)]]
+    assert len(service.deye.updates) == 2 and len(service.messenger.texts) == 1     # the same tables: quiet
+
+
+async def test_a_schedule_change_that_keeps_the_table_is_quiet(make):
+    service, clock = make()
+    await ready(service, clock["now"])
+    await service.replan(clock["now"], "test")
+    assert len(service.messenger.texts) == 1
+    # DTEK moves the outage by half an hour; today's table stays as it was: nothing to say.
+    service.sources.payload["days"][0]["lines"][0]["slots"][16] = "power_off_first_30"
+    clock["now"] += timedelta(minutes=5)
+    await service.replan(clock["now"], "schedule")
+    assert len(service.messenger.texts) == 1
+    assert service.state.sent_schedule["2026-10-17"][16] == "power_off_first_30"
+    # Tomorrow's first schedule is news even if its table is what the plan had anyway.
+    service.sources.payload = with_tomorrow(service.sources.payload, {9})
+    clock["now"] += timedelta(minutes=5)
+    await service.replan(clock["now"], "schedule")
+    assert len(service.messenger.texts) == 2 and service.messenger.texts[1].startswith("🔋 <b>Таблиця TOU на завтра, 18.10")
+
+
+async def test_a_short_loss_of_inputs_keeps_the_last_plan(make):
+    service, clock, first = await plan_with_tomorrow(make, T(17, 12))
+    service.sources.weather_ok = False
+    service.forecast = None
+    clock["now"] = T(17, 14)
+    report = await service.replan(clock["now"], "hourly")
+    assert report.fallback == "немає прогнозу сонця" and report.kept_from == T(17, 12)
+    assert report.tables == first.tables and report.table == first.table
+    clock["now"] = T(17, 18, 1)                                       # six hours on: the safe table
+    report = await service.replan(clock["now"], "hourly")
+    assert report.kept_from is None and report.table == safe_table(service.p)
+
+
+# ---- the battery during an outage ----
+
+async def test_a_battery_that_will_not_last_is_reported_once(make):
+    # 15:10 in the 15:00-17:00 outage: 30% at ~900 W lasts about an hour, the grid is due at 17:00 (+30 min).
+    service, clock = make(now=T(17, 15, 10))
+    service.sources.reading = {"soc": 30.0, "grid_present": False, "load_w": 950.0, "pv_w": 50.0}
+    await service.watch(clock["now"])
+    text = service.messenger.texts[-1]
+    assert text.startswith("🪫 <b>Батареї може не вистачити до світла</b>\nЗаряд 30%, навантаження ~900 Вт")
+    assert "вистачить приблизно до 16:1" in text and "За графіком світло о 17:00." in text
+    await service.watch(T(17, 15, 13))
+    assert len(service.messenger.texts) == 1                          # once per outage
+    assert [r["kind"] for r in service.journal.read()] == ["alert"]
+    # Light load: no alarm.
+    quiet, _ = make(now=T(17, 15, 10))
+    quiet.sources.reading = {"soc": 60.0, "grid_present": False, "load_w": 300.0, "pv_w": 0.0}
+    await quiet.watch(T(17, 15, 10))
+    assert quiet.messenger.texts == []
+
+
+async def test_an_outage_outside_the_schedule_is_watched_too(make):
+    service, clock = make(now=T(17, 19))
+    service.sources.reading = {"soc": 25.0, "grid_present": False, "load_w": 600.0, "pv_w": 0.0}
+    await service.watch(clock["now"])
+    assert service.messenger.texts[-1].endswith("Світла немає поза графіком.\nВарто зменшити навантаження.")
+    service.sources.reading = {**service.sources.reading, "grid_present": True}
+    await service.watch(T(17, 19, 3))
+    assert service._off_since is None and len(service.messenger.texts) == 1

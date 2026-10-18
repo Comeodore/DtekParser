@@ -33,16 +33,19 @@ class HttpSources:
     async def inverter(self) -> dict:
         return await self._get(f"{self._cfg.dtek_url}/api/v1/inverter/latest")
 
+    def _place(self) -> dict:
+        """The panels' plane: Open-Meteo turns each model's radiation into irradiance on it."""
+        return {"latitude": self._cfg.latitude, "longitude": self._cfg.longitude, "tilt": self._cfg.tilt,
+                "azimuth": self._cfg.azimuth, "timezone": "Europe/Kyiv"}
+
     async def previous_runs(self, first: date, last: date) -> dict:
         """Each model's forecast for those days as it was a day earlier."""
         return await self._get("https://previous-runs-api.open-meteo.com/v1/forecast", {
-            "latitude": self._cfg.latitude, "longitude": self._cfg.longitude,
-            "hourly": "shortwave_radiation_previous_day1", "models": ",".join(MODELS), "timezone": "Europe/Kyiv",
+            **self._place(), "hourly": "global_tilted_irradiance_previous_day1", "models": ",".join(MODELS),
             "start_date": first.isoformat(), "end_date": last.isoformat()})
 
     async def weather(self) -> tuple[dict, Optional[dict]]:
-        common = {"latitude": self._cfg.latitude, "longitude": self._cfg.longitude, "hourly": "shortwave_radiation",
-                  "timezone": "Europe/Kyiv", "forecast_days": 3}
+        common = {**self._place(), "hourly": "global_tilted_irradiance", "forecast_days": 3}
         multi = await self._get("https://api.open-meteo.com/v1/forecast", {**common, "models": ",".join(MODELS)})
         try:
             ensemble = await self._get("https://ensemble-api.open-meteo.com/v1/ensemble",
