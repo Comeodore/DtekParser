@@ -465,7 +465,8 @@ async def test_the_sun_is_the_median_of_the_models_that_fit_the_panels(make):
     top = sorted(multi[f"shortwave_radiation_{m}"][i] for m in TOP3)
     ens = fixture("openmeteo_ensemble_20261017_1511.json")["hourly"]
     p10 = sorted(v[i] for k, v in ens.items() if k != "time")[5]
-    assert service.forecast.p50[(date(2026, 10, 18), 12)] == pytest.approx(top[1] * 5.35)
+    assert service.forecast.p50[(date(2026, 10, 18), 12)] == pytest.approx(
+        (top[1] + multi["shortwave_radiation_ecmwf_ifs025"][i]) / 2 * 5.35)
     assert service.forecast.pess[(date(2026, 10, 18), 12)] == pytest.approx(min(p10, top[1]) * 5.35)
     await service.replan(clock["now"], "test")
     assert service.journal.read()[0]["models"]["2026-10-18"] == TOP3
@@ -489,9 +490,8 @@ def test_ranking_skips_hours_with_a_full_battery():
     assert full and max(s.hours for s in sunny) <= 24 - len(full)
 
 
-def test_ecmwf_outside_the_top_has_no_say():
-    # 03-17.10 on the server: Météo-France, ICON and UKMO fit best, ECMWF came fourth. Until 19.10 it still
-    # had its own half of P50; against the panels on 09-18.10 that read more sun than came.
+def test_ecmwf_keeps_its_half_of_p50_outside_the_top():
+    # 03-17.10 on the server: Météo-France, ICON and UKMO fit best, ECMWF came fourth.
     multi, ens = fixture("openmeteo_models_20261017_1511.json"), fixture("openmeteo_ensemble_20261017_1511.json")
     top = ["meteofrance_seamless", "icon_seamless", "ukmo_seamless"]
     fc = combine_forecast(multi, ens, 5.35, T(17, 15), top + ["ecmwf_ifs025"], 3)
@@ -499,8 +499,8 @@ def test_ecmwf_outside_the_top_has_no_say():
     i = h["time"].index("2026-10-18T13:00")
     med = sorted(h[f"shortwave_radiation_{m}"][i] for m in top)[1]
     assert fc.models[date(2026, 10, 18)] == top
-    assert fc.p50[(date(2026, 10, 18), 12)] == pytest.approx(med * 5.35)
-    assert fc.total_kwh(date(2026, 10, 18)) >= fc.total_kwh(date(2026, 10, 18), pessimistic=True)
+    assert fc.p50[(date(2026, 10, 18), 12)] == pytest.approx((med + h["shortwave_radiation_ecmwf_ifs025"][i]) / 2 * 5.35)
+    assert fc.total_kwh(date(2026, 10, 18)) > fc.total_kwh(date(2026, 10, 18), pessimistic=True) + 1
 
 
 SOLCAST = {"forecasts": [
@@ -575,7 +575,7 @@ def test_the_sun_is_irradiance_on_the_panels_plane():
     i = h["time"].index("2026-10-19T13:00")
     med = sorted(h[f"global_tilted_irradiance_{m}"][i] for m in top)[1]
     assert fc.ensemble and fc.models[date(2026, 10, 19)] == top
-    assert fc.p50[(date(2026, 10, 19), 12)] == pytest.approx(med * 4.4)
+    assert fc.p50[(date(2026, 10, 19), 12)] == pytest.approx((med + h["global_tilted_irradiance_ecmwf_ifs025"][i]) / 2 * 4.4)
     members = sorted(v[i] for k, v in ens["hourly"].items() if k != "time")
     assert fc.pess[(date(2026, 10, 19), 12)] == pytest.approx(min(members[5], med) * 4.4)
     # The models are ranked on the same plane, by name.

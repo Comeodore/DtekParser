@@ -194,7 +194,7 @@ def test_simulation_keeps_the_floor_while_the_grid_is_there():
     assert out.soc_end < 45 and out.buy_day == 0                       # an outage goes below it
 
 
-def test_forecast_is_the_models_median():
+def test_forecast_combines_ecmwf_with_the_models_median():
     multi, ens = fixture("openmeteo_models_20261017_1511.json"), fixture("openmeteo_ensemble_20261017_1511.json")
     fc = combine_forecast(multi, ens, 5.35, T(17, 15))
     assert fc.ensemble and fc.covers([date(2026, 10, 17), date(2026, 10, 18)])
@@ -203,14 +203,14 @@ def test_forecast_is_the_models_median():
     models = [k for k in h if k != "time"]
     vals = sorted(h[k][i] for k in models)
     med = (vals[3] if len(vals) == 7 else None)
-    assert fc.p50[(date(2026, 10, 18), 12)] == pytest.approx(med * 5.35)
+    assert fc.p50[(date(2026, 10, 18), 12)] == pytest.approx((med + h["shortwave_radiation_ecmwf_ifs025"][i]) / 2 * 5.35)
     members = sorted(v[i] for k, v in ens["hourly"].items() if k != "time")
     assert fc.pess[(date(2026, 10, 18), 12)] == pytest.approx(min(members[5], med) * 5.35)
     # UKMO has gaps on the 19th: that day goes by the other six models.
     j = h["time"].index("2026-10-19T13:00")
     assert h["shortwave_radiation_ukmo_seamless"][j] is None
     six = sorted(h[k][j] for k in models if "ukmo" not in k)
-    assert fc.p50[(date(2026, 10, 19), 12)] == pytest.approx((six[2] + six[3]) / 2 * 5.35)
+    assert fc.p50[(date(2026, 10, 19), 12)] == pytest.approx(((six[2] + six[3]) / 2 + h["shortwave_radiation_ecmwf_ifs025"][j]) / 2 * 5.35)
     assert (date(2026, 10, 16), 23) not in fc.p50                      # only the 00:00 stamp of the 17th: not a day
 
 

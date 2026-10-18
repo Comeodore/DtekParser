@@ -154,13 +154,13 @@ def combine_forecast(multi: dict, ensemble: Optional[dict], pv_factor: float, fe
     which follows the low winter sun that horizontal radiation misses (on clear
     December days the roof gets ~1.8x the horizontal, in October ~1.3x).
 
-      P50  = median of models
+    Backtest 23.08-16.10 (day-ahead vs satellite): ECMWF IFS had the lowest
+    error, the median of models never mixed up dark, mixed and sunny days,
+    and the default best_match (ICON) under-forecast. So:
+      P50  = mean(ECMWF, median of models)
       pess = min(ECMWF ensemble P10, median of models)
     With a `ranking` (rank_models: best fit to this roof first) the median is
-    of the `top` best models only. Until 19.10 P50 was mean(ECMWF, median),
-    after a satellite backtest of 23.08-16.10; against the panels on 09-18.10
-    (days without a full battery) ECMWF read more sun than came, and the
-    median of the top 3 alone was off by 0.83 kWh a day against 1.34. A model with gaps on a day (UKMO beyond
+    of the `top` best models only. A model with gaps on a day (UKMO beyond
     ~2 days) is left out for that day, and the next one in the ranking stands in.
     Radiation is the mean of the preceding hour: the value stamped h+1 is PV hour h.
     Without the ensemble the pessimistic case is half the median.
@@ -170,6 +170,7 @@ def combine_forecast(multi: dict, ensemble: Optional[dict], pv_factor: float, fe
     models = [k for k in hourly if k != "time"]
     if not times or not models:
         raise InputError("Open-Meteo не повернув прогноз")
+    ecmwf = next((k for k in models if k.endswith("ecmwf_ifs025")), None)
 
     def gen_hour(stamp: str) -> tuple[date, int]:
         t = datetime.fromisoformat(stamp) - timedelta(hours=1)
@@ -193,6 +194,7 @@ def combine_forecast(multi: dict, ensemble: Optional[dict], pv_factor: float, fe
         usable = [m for m in models if all(hourly[m][i] is not None for i in idx)]
         if not usable:
             continue
+        with_ecmwf = ecmwf in usable        # ECMWF's own half of P50 does not depend on its rank
         if ranking:
             by_name = {model_name(m): m for m in usable}
             usable = [by_name[r] for r in ranking if r in by_name][:top] or usable
@@ -200,13 +202,14 @@ def combine_forecast(multi: dict, ensemble: Optional[dict], pv_factor: float, fe
         for i in idx:
             key = gen_hour(times[i])
             med = _median([hourly[m][i] for m in usable])
+            mid = (med + hourly[ecmwf][i]) / 2 if with_ecmwf else med
             low = med * 0.5
             j = ens_index.get(times[i])
             if j is not None:
                 vals = sorted(v[j] for v in members.values() if v[j] is not None)
                 if vals:
                     low = min(vals[min(int(len(vals) * 0.1), len(vals) - 1)], med)
-            p50[key] = med * pv_factor
+            p50[key] = mid * pv_factor
             pess[key] = low * pv_factor
     if not p50:
         raise InputError("у прогнозі Open-Meteo немає повних днів")
