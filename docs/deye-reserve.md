@@ -58,8 +58,12 @@ and PV charging stopped at ~2.7 kW whatever the SOC.
   (ECMWF, UKMO, GEM, ICON, GFS, Météo-France, CMA) plus the 51-run ECMWF
   ensemble. PV W = 4.4 × GTI (what 5.35 × horizontal was in September–
   October; the plane follows the low winter sun: on clear December days the
-  roof gets ~1.8× the horizontal). P50 = mean(ECMWF, median of the top-3
-  models), pessimistic = min(ECMWF ensemble P10, median of the top-3). The
+  roof gets ~1.8× the horizontal). P50 = median of the top-3 models,
+  pessimistic = min(ECMWF ensemble P10, median of the top-3). Until 19.10
+  P50 was mean(ECMWF, median); against the panels on 09–18.10 (days without
+  a full battery) ECMWF read more sun than came, and the median of the top
+  3 alone was off by 0.83 kWh a day against 1.34 (bias −0.2 against +0.55).
+  The
   top 3 are ranked once a day by how well their day-ahead forecasts
   (previous runs, on the same plane) matched the panels over 14 days, on
   hours with the battery under 95%.
