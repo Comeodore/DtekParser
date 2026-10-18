@@ -1,4 +1,4 @@
-"""Local HTTP: webhooks from dtek-service in, health and the current plan out."""
+"""Local HTTP: webhooks from dtek-service in; health, the current plan and today's sun out."""
 from __future__ import annotations
 
 from aiohttp import web
@@ -31,8 +31,15 @@ def make_app(service: ReserveService) -> web.Application:
             raise web.HTTPNotFound(text="no plan yet")
         return web.json_response(body)
 
+    async def sun(_: web.Request) -> web.Response:
+        body = service.sun_today()
+        if body is None:
+            raise web.HTTPNotFound(text="no forecast for today")
+        return web.json_response(body)
+
     app = web.Application()
     app.router.add_post("/events/{kind}", event)
+    app.router.add_get("/sun", sun)
     app.router.add_get("/health", health)
     app.router.add_get("/plan", plan)
     return app

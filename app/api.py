@@ -147,6 +147,10 @@ def create_app(service: Service) -> FastAPI:
         collector, now = resolve(request, source), now_kyiv()
         monitor = service.inverter
         inverter = monitor.payload(now) if monitor is not None and monitor.source == collector.name else None
+        if inverter is not None:
+            sun = await service.reserve.sun()
+            if sun and sun.get("date") == now.date().isoformat():
+                inverter["pv_forecast_kwh"] = sun.get("p50_kwh")
         payload = schedule_payload(collector, now, inverter, batteries_for(collector.name, now))
         return JSONResponse(payload, headers=NO_CACHE)
 

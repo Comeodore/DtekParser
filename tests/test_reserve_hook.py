@@ -85,3 +85,27 @@ async def test_hook_posts_and_never_raises():
     await next(iter(dead._tasks))
     assert dead.failures == 1
     ReserveHook(None).fire("grid", "lost")                          # not configured: nothing at all
+
+
+def test_the_inverter_reports_its_day_of_sun():
+    assert parse_device_latest(device(), 100).pv_today_kwh == 1.7
+    assert parse_device_latest(device(), 100).to_dict(kyiv(2026, 10, 16, 17, 25), 900)["pv_today_kwh"] == 1.7
+
+
+def test_the_krem_mini_app_gets_todays_sun_forecast(monkeypatch):
+    service = Service(load_settings({**BASE_ENV, **DEYE_ENV, "DEYE_RESERVE_URL": "http://127.0.0.1:9997"}),
+                      store=MemoryStore(), gateway=object())
+    service.inverter.latest = parse_device_latest(device(), 100)
+    monkeypatch.setattr("app.api.now_kyiv", lambda: kyiv(2026, 10, 16, 17, 25))
+
+    async def sun():
+        return {"date": "2026-10-16", "p50_kwh": 2.4, "low_kwh": 1.2}
+    service.reserve.sun = sun
+    http = TestClient(create_app(service))
+    inv = http.get("/api/v1/schedule?source=krem").json()["inverter"]
+    assert (inv["pv_today_kwh"], inv["pv_forecast_kwh"]) == (1.7, 2.4)
+
+    async def yesterday():
+        return {"date": "2026-10-15", "p50_kwh": 9.9}
+    service.reserve.sun = yesterday
+    assert "pv_forecast_kwh" not in http.get("/api/v1/schedule?source=krem").json()["inverter"]

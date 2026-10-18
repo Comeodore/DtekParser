@@ -52,6 +52,7 @@ class InverterReading:
     grid_w: Optional[float]         # drawn from the grid; negative when feeding in
     grid_v: Optional[float]
     grid_present: bool
+    pv_today_kwh: Optional[float] = None    # the panels' output since the inverter's midnight
 
     def to_dict(self, now: datetime, stale_after_s: float) -> dict:
         return {
@@ -66,6 +67,7 @@ class InverterReading:
             "grid_w": self.grid_w,
             "grid_v": self.grid_v,
             "grid_present": self.grid_present,
+            "pv_today_kwh": self.pv_today_kwh,
         }
 
 
@@ -96,6 +98,7 @@ def parse_device_latest(item: dict, min_grid_voltage: float) -> InverterReading:
         grid_w=num("TotalGridPower"),
         grid_v=grid_v,
         grid_present=grid_v is not None and grid_v >= min_grid_voltage,
+        pv_today_kwh=num("PVDailyPowerGenerationActive"),
     )
 
 

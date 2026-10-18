@@ -702,3 +702,13 @@ async def test_an_outage_outside_the_schedule_is_watched_too(make):
     service.sources.reading = {**service.sources.reading, "grid_present": True}
     await service.watch(T(17, 19, 3))
     assert service._off_since is None and len(service.messenger.texts) == 1
+
+
+async def test_todays_sun_for_the_mini_app(make):
+    service, clock = make()
+    async with TestClient(TestServer(make_app(service))) as http:
+        assert (await http.get("/sun")).status == 404                 # no forecast yet
+        await service.refresh_forecast(clock["now"])
+        body = await (await http.get("/sun")).json()
+    assert body["date"] == "2026-10-17" and body["p50_kwh"] > body["low_kwh"] > 0
+    assert body["p50_kwh"] == round(service.forecast.total_kwh(date(2026, 10, 17)), 2)

@@ -648,6 +648,15 @@ class ReserveService:
 
     # ---- status ----
 
+    def sun_today(self) -> Optional[dict]:
+        """Today's PV forecast in kWh, for the krem mini app (dtek-service shows it next to the panels' output)."""
+        today = local(self._clock()).date()
+        if self.forecast is None or not self.forecast.covers([today]):
+            return None
+        return {"date": today.isoformat(), "p50_kwh": round(self.forecast.total_kwh(today), 2),
+                "low_kwh": round(self.forecast.total_kwh(today, pessimistic=True), 2),
+                "fetched_at": self.forecast.fetched_at.isoformat()}
+
     def health(self) -> dict:
         now = self._clock()
         return {
