@@ -65,20 +65,15 @@ class ReserveService:
     LOAD_DAYS = 7
     RETRY_INPUT = timedelta(minutes=15)
     RETRY_LOAD = timedelta(hours=1)
-    TOU_CACHE = timedelta(minutes=10)
     # Writing: how long to wait for the inverter to take the command, then for the cloud to show it.
     ORDER_POLL_S = 5.0
     # The inverter gets this long to take the table. With 30 s it went unanswered (540) three times on 18.10
     # while a 120 s order of the same table was done in 5 s.
     ORDER_TIMEOUT_S = 120
     ORDER_WAIT_S = 150.0
-    # 540 is the inverter not answering in time: one more try a minute later before it is an alarm.
-    RETRY_ON = ("540",)
-    RETRY_AFTER_S = 60.0
-    # Status 666 means the inverter took the table; /config/tou shows it later (13 min on 17.10, during an
-    # outage), so the check runs in the background and alarms only if the table never shows up.
-    VERIFY_EVERY = timedelta(minutes=5)
-    VERIFY_FOR = timedelta(minutes=30)
+    # A table that did not go in is sent again 5 min later, three more times; then it is an alarm.
+    WRITE_ATTEMPTS = 4
+    RETRY_AFTER_S = 300.0
     WRITE_BACKOFF = timedelta(minutes=30)
 
     def __init__(self, config: Config, sources: Sources, deye: Deye, messenger: Messenger,
@@ -117,7 +112,6 @@ class ReserveService:
         self._next_solcast = self.next_time(now, config.solcast_at) if solcast else None
         self._next_load = now
         self._forecast_new = False
-        self._tou_cache: Optional[tuple[datetime, Table]] = None
         self._write_lock = asyncio.Lock()
         self._write_blocked_until: Optional[datetime] = None
 
@@ -184,8 +178,6 @@ class ReserveService:
 
     def next_due(self) -> datetime:
         times = [self._next_poll, self._next_replan, self._next_forecast, self._next_load]
-        if self.state.verify:
-            times.append(self._verify_at())
         if self._next_solcast is not None:
             times.append(self._next_solcast)
         if self.event_due is not None:
@@ -220,8 +212,6 @@ class ReserveService:
         if now >= self._next_poll:
             self._next_poll = now + timedelta(seconds=self.cfg.poll_s)
             await self.poll_schedule(now)
-        if self.state.verify and now >= self._verify_at():
-            await self.verify(now)
         if self._next_solcast is not None and now >= self._next_solcast:
             await self.refresh_solcast(now)
         reason = None
@@ -461,18 +451,6 @@ class ReserveService:
             self.state.device_sn = await self.deye.inverter_sn(self.cfg.station_id)
         return self.state.device_sn
 
-    async def inverter_table(self, now: datetime, fresh: bool = False) -> Optional[Table]:
-        """The table in the inverter as Deye Cloud has it; None when it cannot be read."""
-        if not fresh and self._tou_cache and now - self._tou_cache[0] < self.TOU_CACHE:
-            return self._tou_cache[1]
-        try:
-            table, _ = await self.deye.read_tou(await self.device_sn())
-        except Exception as e:
-            logger.warning(f"TOU read failed: {type(e).__name__}: {e}")
-            return None
-        self._tou_cache = (now, table)
-        return table
-
     # ---- writing (DEYE_RESERVE_WRITE=true only) ----
 
     def write_blocker(self, report: Report, now: datetime) -> Optional[str]:
@@ -492,14 +470,12 @@ class ReserveService:
         return None
 
     async def _apply(self, report: Report, now: datetime) -> tuple[str, str]:
-        """Gets the table into the inverter: ("already" | "written" | "blocked" | "failed", detail)."""
-        if self.state.verify and self.state.verify["table"] == table_to_list(report.table):
-            return "already", ""        # taken, the cloud has yet to show it
-        current = await self.inverter_table(now)
-        if current is None and table_to_list(report.table) == self.state.written_table:
-            return "already", ""
-        if current is not None and tuple(current) == tuple(report.table):
-            self.state.written_table = table_to_list(report.table)
+        """Gets the table into the inverter: ("already" | "written" | "blocked" | "failed", detail).
+
+        Status 666 from Deye is taken as written; the cloud's /config/tou is not read back (it shows a new
+        table only minutes later). A table goes out again only when the plan changes.
+        """
+        if table_to_list(report.table) == self.state.written_table:
             return "already", ""
         blocker = self.write_blocker(report, now)
         if blocker is not None:
@@ -510,15 +486,16 @@ class ReserveService:
         return ("written", "") if ok else ("failed", detail)
 
     async def write(self, table: Table) -> tuple[bool, str]:
-        """One command: send it and wait for the inverter's answer; status 666 is a write."""
+        """Send the table and wait for the inverter's answer (666 = written); on failure up to three more
+        tries 5 min apart."""
         async with self._write_lock:
             ok, detail, order_id = False, "", None
-            try:
-                sn = await self.device_sn()
-                for attempt in (1, 2):
+            for attempt in range(1, self.WRITE_ATTEMPTS + 1):
+                try:
+                    sn = await self.device_sn()
                     order_id = await self.deye.update_tou(
                         tou_request(sn, table, self.p.slot_power_w, timeout_s=self.ORDER_TIMEOUT_S))
-                    logger.info(f"TOU write sent, order {order_id}: {table_line(table)}")
+                    logger.info(f"TOU write sent (try {attempt}), order {order_id}: {table_line(table)}")
                     result = await self._wait_order(order_id)
                     status = _int(result.get("status")) if result else None
                     if status == ORDER_DONE:
@@ -527,28 +504,29 @@ class ReserveService:
                     code = str((result or {}).get("error") or "")
                     detail = (f"команда {order_id}: статус {status}, {ORDER_ERRORS.get(code, code)}".rstrip(", ")
                               if result else f"інвертор не підтвердив команду {order_id} за {self.ORDER_WAIT_S:.0f} с")
-                    if attempt == 1 and code in self.RETRY_ON:
-                        logger.warning(f"TOU write: {detail}; trying once more")
-                        await self._sleep(self.RETRY_AFTER_S)
-                        continue
-                    break
-            except DeyeRateLimited:
-                detail = "Deye Cloud: забагато запитів (429)"
-            except (DeyeError, ValueError) as e:
-                detail = str(e)
-            except Exception as e:
-                detail = f"{type(e).__name__}: {e}"
+                except DeyeRateLimited:
+                    detail = "Deye Cloud: забагато запитів (429)"
+                except ValueError as e:
+                    detail = str(e)
+                    break           # a malformed table does not get better
+                except Exception as e:
+                    detail = str(e) if isinstance(e, DeyeError) else f"{type(e).__name__}: {e}"
+                if attempt < self.WRITE_ATTEMPTS:
+                    logger.warning(f"TOU write: {detail}; trying again in {self.RETRY_AFTER_S / 60:.0f} min")
+                    await self._sleep(self.RETRY_AFTER_S)
             now = self._clock()
+            if not ok:
+                detail = f"{_tries(attempt)} з паузою {self.RETRY_AFTER_S / 60:.0f} хв, остання: {detail}"
             self.state.last_write = {"at": now.isoformat(), "table": table_to_list(table), "ok": ok, "detail": detail}
             if ok:
                 self.state.written_table = table_to_list(table)
-                self.state.verify = {"table": table_to_list(table), "order": order_id, "sent": now.isoformat()}
                 self._write_blocked_until = None
-                logger.info(f"TOU write done (order {order_id}), checking the cloud shows it")
+                logger.info(f"TOU written (order {order_id}, try {attempt})")
             else:
                 self._write_blocked_until = now + self.WRITE_BACKOFF
                 logger.error(f"TOU write failed: {detail}")
-            self.journal.add("write", now, table=table_to_list(table), ok=ok, detail=detail, order=order_id)
+            self.journal.add("write", now, table=table_to_list(table), ok=ok, detail=detail, order=order_id,
+                             attempts=attempt)
             self._save()
             return ok, detail
 
@@ -562,33 +540,6 @@ class ReserveService:
                 return None
             await self._sleep(self.ORDER_POLL_S)
             waited += self.ORDER_POLL_S
-
-    def _verify_at(self) -> datetime:
-        v = self.state.verify
-        sent = datetime.fromisoformat(v["sent"])
-        return sent + self.VERIFY_EVERY * (int(v.get("checks", 0)) + 1)
-
-    async def verify(self, now: datetime) -> None:
-        """A written table must show up in /config/tou within VERIFY_FOR; otherwise it is an alarm."""
-        v = self.state.verify
-        table = table_from_list(v["table"])
-        sent = datetime.fromisoformat(v["sent"])
-        current = await self.inverter_table(now, fresh=True)
-        if current is not None and tuple(current) == tuple(table):
-            logger.info(f"TOU order {v['order']} shows in the cloud after {(now - sent).total_seconds() / 60:.0f} min")
-            self.journal.add("verify", now, order=v["order"], ok=True, after_min=round((now - sent).total_seconds() / 60))
-            self.state.verify = None
-        elif now - sent >= self.VERIFY_FOR:
-            minutes = round(self.VERIFY_FOR.total_seconds() / 60)
-            detail = f"Deye прийняв команду {v['order']}, але за {minutes} хв таблиця в інверторі не змінилась"
-            logger.error(detail)
-            self.journal.add("verify", now, order=v["order"], ok=False, detail=detail)
-            self.state.verify, self.state.written_table = None, None
-            self._write_blocked_until = now + self.WRITE_BACKOFF
-            await self.messenger.send(render_alarm(table, detail, current))
-        else:
-            v["checks"] = int(v.get("checks", 0)) + 1
-        self._save()
 
     # ---- status ----
 
@@ -628,6 +579,10 @@ class ReserveService:
                         candidates={n: {"safe": s, "cost": round(c, 2), "lowest": round(lo, 1)}
                                     for n, (s, c, lo) in p.candidates.items()})
         return body
+
+
+def _tries(n: int) -> str:
+    return f"{n} спроба" if n == 1 else f"{n} спроби" if 2 <= n <= 4 else f"{n} спроб"
 
 
 def _int(value) -> Optional[int]:
