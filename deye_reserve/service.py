@@ -68,7 +68,13 @@ class ReserveService:
     TOU_CACHE = timedelta(minutes=10)
     # Writing: how long to wait for the inverter to take the command, then for the cloud to show it.
     ORDER_POLL_S = 5.0
-    ORDER_WAIT_S = 90.0
+    # The inverter gets this long to take the table. With 30 s it went unanswered (540) three times on 18.10
+    # while a 120 s order of the same table was done in 5 s.
+    ORDER_TIMEOUT_S = 120
+    ORDER_WAIT_S = 150.0
+    # 540 is the inverter not answering in time: one more try a minute later before it is an alarm.
+    RETRY_ON = ("540",)
+    RETRY_AFTER_S = 60.0
     # Status 666 means the inverter took the table; /config/tou shows it later (13 min on 17.10, during an
     # outage), so the check runs in the background and alarms only if the table never shows up.
     VERIFY_EVERY = timedelta(minutes=5)
@@ -509,16 +515,23 @@ class ReserveService:
             ok, detail, order_id = False, "", None
             try:
                 sn = await self.device_sn()
-                order_id = await self.deye.update_tou(tou_request(sn, table, self.p.slot_power_w))
-                logger.info(f"TOU write sent, order {order_id}: {table_line(table)}")
-                result = await self._wait_order(order_id)
-                status = _int(result.get("status")) if result else None
-                if status != ORDER_DONE:
+                for attempt in (1, 2):
+                    order_id = await self.deye.update_tou(
+                        tou_request(sn, table, self.p.slot_power_w, timeout_s=self.ORDER_TIMEOUT_S))
+                    logger.info(f"TOU write sent, order {order_id}: {table_line(table)}")
+                    result = await self._wait_order(order_id)
+                    status = _int(result.get("status")) if result else None
+                    if status == ORDER_DONE:
+                        ok = True
+                        break
                     code = str((result or {}).get("error") or "")
                     detail = (f"команда {order_id}: статус {status}, {ORDER_ERRORS.get(code, code)}".rstrip(", ")
                               if result else f"інвертор не підтвердив команду {order_id} за {self.ORDER_WAIT_S:.0f} с")
-                else:
-                    ok = True
+                    if attempt == 1 and code in self.RETRY_ON:
+                        logger.warning(f"TOU write: {detail}; trying once more")
+                        await self._sleep(self.RETRY_AFTER_S)
+                        continue
+                    break
             except DeyeRateLimited:
                 detail = "Deye Cloud: забагато запитів (429)"
             except (DeyeError, ValueError) as e:

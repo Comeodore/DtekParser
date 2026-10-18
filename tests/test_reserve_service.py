@@ -273,6 +273,36 @@ async def test_status_666_is_a_write_and_the_cloud_is_checked_after(make):
     assert rows == [("write", True, None), ("verify", True, 15)]
 
 
+async def test_an_unanswered_command_is_sent_once_more(make):
+    service, clock = make(now=T(17, 18), DEYE_RESERVE_WRITE="true")
+    await ready(service, clock["now"])
+    service.deye.statuses = [500, 666]
+    original = service.deye.order
+
+    async def answers(order_id):
+        result = await original(order_id)
+        return {**result, "error": "540"} if result["status"] == 500 else result
+    service.deye.order = answers
+    await service.replan(clock["now"], "test")
+    assert len(service.deye.updates) == 2 and service.state.verify is not None
+    assert service.deye.updates[0]["timeoutSeconds"] == 120
+    assert not any("🚨" in t for t in service.messenger.texts)
+
+
+async def test_a_second_unanswered_command_is_an_alarm(make):
+    service2, clock2 = make(now=T(17, 18), DEYE_RESERVE_WRITE="true")
+    await ready(service2, clock2["now"])
+    service2.deye.statuses = [500, 500]
+
+    async def never(order_id):
+        result = await service2.deye.__class__.order(service2.deye, order_id)
+        return {**result, "error": "540"}
+    service2.deye.order = never
+    await service2.replan(clock2["now"], "test")
+    assert len(service2.deye.updates) == 2
+    assert "інвертор не відповів вчасно" in service2.messenger.texts[-1]
+
+
 async def test_a_table_that_never_shows_up_is_an_alarm(make):
     service, clock = make(now=T(17, 18), DEYE_RESERVE_WRITE="true")
     await ready(service, clock["now"])
