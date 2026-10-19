@@ -47,7 +47,8 @@ def decisions(rows: list[dict]) -> list[str]:
                        + (f"shows in the cloud after {row.get('after_min')} min" if row["ok"] else f"FAILED: {row.get('detail')}"))
             continue
         if row["kind"] == "message":
-            out.append(f"{_hm(_t(row['at']))} MESSAGE day {row.get('day')} ({row.get('outcome')})")
+            out.append(f"{_hm(_t(row['at']))} MESSAGE day {row.get('day')} ({row.get('outcome')})"
+                       + (f": {'; '.join(row['reasons'])}" if row.get("reasons") else ""))
             continue
         if row["kind"] == "alert":
             out.append(f"{_hm(_t(row['at']))} BATTERY ALERT soc {row.get('soc')} at {row.get('load_w')} W, "

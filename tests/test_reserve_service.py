@@ -9,6 +9,7 @@ from deye_reserve.config import ConfigError, load_config
 from deye_reserve.deye import parse_tou, tou_request
 from deye_reserve.inputs import (InputError, changed_days, combine_forecast, parse_schedule, parse_solcast,
                                  rank_models)
+from deye_reserve.messages import change_reasons
 from deye_reserve.net import HttpSources
 from deye_reserve.planner import Params, Slot, safe_table
 from deye_reserve.review import actual, decisions, solcast_lines
@@ -189,7 +190,7 @@ async def test_plan_is_sent_once_and_again_when_the_schedule_changes(make):
     assert service.messenger.texts == [
         "🔋 <b>Таблиця TOU на сьогодні, 17.10</b>\n<pre>" + "\n".join(
             f"{s.time}  {s.soc:>3}%{'  ⚡ заряд від мережі' if s.grid_charge else ''}" for s in report.table)
-        + "</pre>\nℹ️ Лише рекомендація: запис вимкнено"]
+        + "</pre>\nℹ️ Лише рекомендація: запис вимкнено\n\nПричина: опубліковано графік на 17.10"]
     clock["now"] += timedelta(minutes=30)
     await service.replan(clock["now"], "hourly")
     assert len(service.messenger.texts) == 1                         # the schedule did not change: quiet
@@ -281,7 +282,8 @@ async def test_status_666_is_written_and_the_cloud_is_not_read_back(make):
     assert len(service.deye.updates) == 1 and service.deye.updates[0]["deviceSn"] == "2511090098"
     assert service.deye.updates[0]["timeoutSeconds"] == 120
     # The table goes to the chat as soon as the inverter took it: a table there is a table in the inverter.
-    assert len(service.messenger.texts) == 1 and service.messenger.texts[0].endswith("</pre>")
+    assert len(service.messenger.texts) == 1
+    assert service.messenger.texts[0].endswith("</pre>\n\nПричина: опубліковано графік на 17.10")
     assert service.state.written_table == [[s.start, s.soc, s.grid_charge] for s in report.table]
     assert service.state.writes_on(date(2026, 10, 17)) == 1
     clock["now"] += timedelta(minutes=7)
@@ -300,7 +302,7 @@ async def test_a_failed_write_is_tried_three_more_times_5_min_apart(make):
     await service.replan(clock["now"], "test")
     assert len(service.deye.updates) == 3 and [w for w in slept.waits if w == 300] == [300, 300]
     assert service.state.written_table is not None
-    assert not any("🚨" in t for t in service.messenger.texts) and service.messenger.texts[0].endswith("</pre>")
+    assert not any("🚨" in t for t in service.messenger.texts) and "</pre>\n\nПричина: " in service.messenger.texts[0]
 
 
 async def test_four_failed_tries_send_the_table_and_the_failure(make):
@@ -313,7 +315,7 @@ async def test_four_failed_tries_send_the_table_and_the_failure(make):
     text = service.messenger.texts[-1]
     assert text.startswith("🔋 <b>Таблиця TOU на сьогодні, 17.10</b>\n<pre>00:00")
     assert text.endswith("🚨 Не вдалося записати: 4 спроби з паузою 5 хв, остання: команда 9001: статус 500, "
-                         "інвертор не виконав команду")
+                         "інвертор не виконав команду\n\nПричина: опубліковано графік на 17.10")
     assert service.state.written_table is None
     assert service.write_blocker(service.report, clock["now"]).startswith("після помилки чекаю")
     # Later, with no schedule news, a failed table is an alarm of its own, with the table in a code block.
@@ -332,7 +334,7 @@ async def test_writes_go_straight_in_even_during_an_outage(make):
     await ready(service, clock["now"])
     service.sources.reading = {**service.sources.reading, "grid_present": False}
     await service.replan(clock["now"], "test")
-    assert len(service.deye.updates) == 1 and service.messenger.texts[0].endswith("</pre>")
+    assert len(service.deye.updates) == 1 and "</pre>\n\nПричина: " in service.messenger.texts[0]
 
 
 async def test_write_guards(make):
@@ -342,7 +344,8 @@ async def test_write_guards(make):
     service.deye.tou = safe_table(service.p, night=65)          # so the safe 90/45 would need writing
     await service.replan(clock["now"], "test")
     assert service.deye.updates == []
-    assert service.messenger.texts[0].endswith("⏸ Запишу, щойно буде можна: інвертор не на зв&#x27;язку")
+    assert service.messenger.texts[0].endswith("⏸ Запишу, щойно буде можна: інвертор не на зв&#x27;язку"
+                                               "\n\nПричина: немає даних для плану")
     report = service.report
     report.reading_fresh = True
     assert service.write_blocker(report, T(17, 18)) is None
@@ -634,7 +637,8 @@ async def test_tomorrows_table_goes_in_when_it_changes_nothing_today(make):
     # The chat shows both days' own tables; tomorrow's says when it goes in.
     text = service.messenger.texts[0]
     assert text.startswith("🔋 <b>Таблиця TOU на сьогодні, 17.10</b>")
-    assert "\n\n🔋 <b>Таблиця TOU на завтра, 18.10</b>\n<pre>" in text and text.endswith("⏭ Застосую о 16:00")
+    assert "\n\n🔋 <b>Таблиця TOU на завтра, 18.10</b>\n<pre>" in text
+    assert text.endswith("⏭ Застосую о 16:00\n\nПричина: опубліковано графік на 17.10; опубліковано графік на 18.10")
     assert service.next_due() <= T(17, 16)
     clock["now"] = T(17, 16)
     await service.tick(clock["now"])
@@ -712,3 +716,76 @@ async def test_todays_sun_for_the_mini_app(make):
         body = await (await http.get("/sun")).json()
     assert body["date"] == "2026-10-17" and body["p50_kwh"] > body["low_kwh"] > 0
     assert body["p50_kwh"] == round(service.forecast.total_kwh(date(2026, 10, 17)), 2)
+
+
+# ---- every change of a day's table goes to the chat, with its reason ----
+
+def test_reasons_say_what_changed_since_the_last_message():
+    today = date(2026, 10, 19)
+    quiet, off = ["power_on"] * 24, ["power_on"] * 9 + ["power_off"] * 4 + ["power_on"] * 11
+    then = {"at": "2026-10-18T21:31:00+03:00", "schedule": {"2026-10-19": off}, "forecast_at": "a",
+            "sun": {"2026-10-19": [5.3, 2.2]}, "load_at": "x", "load_kwh": 8.4, "calibration": False,
+            "soc_expected": {"2026-10-19T11": 80.0}}
+    ctx = {**then, "hour": "2026-10-19T11"}
+    assert change_reasons(then, ctx, today, 79.0) == ["перерахунок за поточним зарядом 79%"]
+    assert change_reasons(then, ctx, today, 79.0, restarted=True) == ["перезапуск сервісу"]
+    later = {**ctx, "schedule": {"2026-10-19": quiet[:9] + ["power_off"] * 5 + quiet[14:], "2026-10-20": off},
+             "forecast_at": "b", "sun": {"2026-10-19": [3.1, 1.4]}, "load_at": "y", "load_kwh": 9.1,
+             "calibration": True}
+    assert change_reasons(then, later, today, 70.0, night_over=True) == [
+        "змінився графік на 19.10", "опубліковано графік на 20.10", "калібрувальний заряд до 100%",
+        "нічний заряд позаду: нічні слоти тепер на наступну ніч",
+        "прогноз сонця на 19.10: 5.3 → 3.1 кВт·год (песимістично 2.2 → 1.4)",
+        "споживання будинку: 8.4 → 9.1 кВт·год на добу", "заряд 70% замість очікуваних 80%"]
+    # Withdrawn outages, a forecast that barely moved, the plan back after a fallback.
+    assert change_reasons({**then, "fallback": "немає прогнозу сонця"},
+                          {**ctx, "schedule": {"2026-10-19": quiet}, "forecast_at": "b",
+                           "sun": {"2026-10-19": [5.2, 2.1]}}, today, 80.0) == [
+        "дані для плану знову є", "скасовано відключення на 19.10"]
+    assert change_reasons(then, {**ctx, "forecast_at": "b"}, today, 80.0) == ["оновився прогноз сонця"]
+    assert change_reasons(then, {**ctx, "fallback": "немає прогнозу сонця"}, today, 80.0) == ["немає даних для плану"]
+    assert change_reasons(then, ctx, today, 80.0, unpublished=date(2026, 10, 20)) == [
+        "графік на 20.10 ще не опубліковано: план без відключень"]
+
+
+def test_a_day_without_a_message_is_held_to_the_last_table_shown(make):
+    service, _ = make()
+    a, b, c = [[0, 90, True]], [[0, 60, True]], [[0, 50, True]]
+    service.state.sent_tables = {"2026-10-15": a, "2026-10-16": b, "2026-10-18": c}
+    assert service._last_shown(date(2026, 10, 17)) == b and service._last_shown(date(2026, 10, 15)) is None
+    service._prune_sent(date(2026, 10, 17))
+    assert service.state.sent_tables == {"2026-10-16": b, "2026-10-18": c}
+
+
+async def test_a_table_changed_by_the_sun_is_sent_with_the_forecast(make):
+    service, clock = make()
+    await ready(service, clock["now"])
+    await service.replan(clock["now"], "test")
+    # As if the last message had another night and an older, sunnier forecast for tomorrow.
+    sent = service.state.sent_tables["2026-10-17"]
+    sent[0][1] = sent[-1][1] = 55 if sent[0][1] != 55 else 65
+    service.state.told.update(forecast_at=T(17, 5, 30).isoformat(), sun={"2026-10-18": [9.9, 5.0]})
+    clock["now"] += timedelta(minutes=30)
+    await service.replan(clock["now"], "новий прогноз")
+    text = service.messenger.texts[-1]
+    assert len(service.messenger.texts) == 2 and text.startswith("🔋 <b>Таблиця TOU на сьогодні, 17.10</b>\n<pre>")
+    assert "</pre>\nℹ️ Лише рекомендація: запис вимкнено\n\nПричина: прогноз сонця на 18.10: 9.9 → " in text
+    row = [r for r in service.journal.read() if r["kind"] == "message"][-1]
+    assert row["reasons"][0].startswith("прогноз сонця на 18.10: 9.9 → ")
+    clock["now"] += timedelta(minutes=30)
+    await service.replan(clock["now"], "hourly")
+    assert len(service.messenger.texts) == 2                         # the same table again: quiet
+
+
+async def test_the_night_gone_by_is_a_reason_of_its_own(make):
+    service, clock = make(now=T(17, 7, 30))
+    await ready(service, clock["now"])
+    await service.replan(clock["now"], "test")
+    # Last evening's message showed the night that has just passed; the plan now has the coming night's.
+    sent = service.state.sent_tables["2026-10-17"]
+    sent[0][1] = sent[-1][1] = 55 if sent[0][1] != 55 else 65
+    service.state.told["at"] = T(16, 21, 31).isoformat()
+    clock["now"] += timedelta(minutes=30)
+    await service.replan(clock["now"], "hourly")
+    assert len(service.messenger.texts) == 2
+    assert service.messenger.texts[-1].endswith("\n\nПричина: нічний заряд позаду: нічні слоти тепер на наступну ніч")

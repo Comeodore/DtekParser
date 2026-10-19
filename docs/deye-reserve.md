@@ -126,13 +126,27 @@ and PV charging stopped at ~2.7 kW whatever the SOC.
 ## Messages (Telegram, the krem bot, owner's chat 370921204 only)
 
 - **A day's table**, as a code block in Ukrainian, when the day's DTEK
-  schedule is first published, or changes so that the day's table
-  changes. A DTEK change that leaves the table as it was is quiet (on
-  18.10 that would have been 2 messages instead of 8). Today and tomorrow
-  can come in one message; tomorrow's says "⏭ Застосую о HH:MM" while it
-  is not in the inverter yet. No line when it is in the inverter; "⏸"
-  when blocked, "🚨" when failed, plus a separate alarm when a write fails
-  with no schedule news.
+  schedule is first published, and again whenever the table changes,
+  whatever changed it (since 19.10; before, only DTEK changes were told,
+  so on 19.10 the chat showed night 55% while the inverter ran 85%).
+  Today, and tomorrow once DTEK published it or its table took over at
+  the switch. A day with no message of its own is held to the last table
+  shown, so midnight with the same table is quiet; so is any change that
+  leaves the table as it was. Today and tomorrow can come in one message;
+  tomorrow's says "⏭ Застосую о HH:MM" while it is not in the inverter
+  yet. No line when it is in the inverter; "⏸" when blocked, "🚨" when
+  failed, plus a separate alarm when a write fails with no table news.
+- **Why**, under the table(s), a blank line apart: "Причина: …", what
+  changed since the last table message (its context is kept in
+  state.json `told`): DTEK published / changed / withdrew a day; tomorrow
+  not published yet (a plan without outages); calibration on or done; the
+  night gone by (after 07:00 only the night slots changed: they now serve
+  the coming night); the sun forecast per day (P50 and pessimistic, when
+  either moved ≥ 0.3 kWh); the house's weekly load (≥ 0.3 kWh/day); the
+  battery ≥ 5% off what the last message's plan expected for this hour;
+  no data for a plan / data back. With none of these: a new forecast,
+  a restart, or "перерахунок за поточним зарядом N%". Expect about 1–3
+  extra messages a day, the morning night change among them.
 - **The battery during an outage** ("🪫 Батареї може не вистачити до
   світла"): every 3 min the reading is looked at; without the grid, if at
   the house's load (mean of the last 30 min, minus PV) the battery reaches

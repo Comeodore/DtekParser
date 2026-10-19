@@ -12,11 +12,12 @@ Replans happen
 
 With DEYE_RESERVE_WRITE=true each replan also gets the table into the
 inverter when it differs, straight away, outage or not. The owner hears
-about a day whose DTEK schedule was published, or changed so that the day's
-table changed: that day's final table, sent once it is in the inverter (a
-line says so only when it is not); about a write that failed; and, during an
-outage, when the battery will not last until the grid is due back at the
-house's present load. The reasons behind every decision go to the journal
+about a day whose DTEK schedule was published, and about every change of a
+day's table after that, whatever brought it (DTEK, the sun, the battery, the
+night gone by), with the reason under the table: the final table, sent once
+it is in the inverter (a line says so only when it is not); about a write
+that failed; and, during an outage, when the battery will not last until the
+grid is due back at the house's present load. The reasons behind every decision go to the journal
 (data/journal.jsonl), for the daily review.
 """
 from __future__ import annotations
@@ -32,7 +33,7 @@ from deye_reserve.deye import ORDER_DONE, ORDER_ERRORS, ORDER_FINAL, DeyeError, 
 from deye_reserve.inputs import (Forecast, InputError, LoadProfile, Schedule, changed_days, combine_forecast,
                                  load_profile, parse_schedule, parse_solcast, rank_models)
 from deye_reserve.journal import Journal
-from deye_reserve.messages import Report, render_alarm, render_battery, render_days, table_line
+from deye_reserve.messages import Report, change_reasons, render_alarm, render_battery, render_days, table_line
 from deye_reserve.planner import Inputs, Planner, Table, local, safe_table, table_now, window
 from deye_reserve.state import (load_state, read_json, save_state, table_to_list, tables_from_dict, tables_to_dict,
                                 write_json)
@@ -413,44 +414,112 @@ class ReserveService:
             report.notes.append("Мережі немає поза графіком")
         self._next_switch = report.switch_at if report.switch_at is not None and report.switch_at > now else None
         changed = table_to_list(report.table) != self.state.written_table
+        restarted = self.last_replan is None
         self.report, self.last_replan = report, now
         logger.info(f"plan {'differs from the inverter' if changed else 'as in the inverter'}: {table_line(report.table)}"
                     + (f" (fallback: {report.fallback}" + (", last plan kept" if report.kept_from else "") + ")"
                        if report.fallback else ""))
         outcome = await self._apply(report, now) if self.cfg.write else ("off", "")
         self._journal_replan(report, reason, outcome)
-        await self._tell(report, schedule, now, outcome)
+        await self._tell(report, schedule, now, outcome, restarted)
         self._save()
         return report
 
     async def _tell(self, report: Report, schedule: Optional[Schedule], now: datetime,
-                    outcome: tuple[str, str]) -> None:
-        """A day whose schedule was published, or changed so that its table changed, gets its final table;
-        a failed write with no such news gets an alarm."""
+                    outcome: tuple[str, str], restarted: bool = False) -> None:
+        """The chat follows the inverter: a day's table goes out when its DTEK schedule is first published, and
+        again whenever it changes, for whatever reason, with that reason under it. Today, and tomorrow once DTEK
+        published it or its table took over; a failed write with no such news gets an alarm."""
         today = local(now).date()
-        days = changed_days(self.state.sent_schedule, schedule.days, today) if schedule is not None else []
-        news = []
+        tomorrow = today + timedelta(days=1)
+        news = changed_days(self.state.sent_schedule, schedule.days, today) if schedule is not None else []
+        # The day whose table the inverter holds: tomorrow's once it took over and differs from today's.
+        current = today
+        if report.switch_at is not None and report.switch_at <= now and tomorrow in report.tables \
+                and report.tables[tomorrow] != report.tables.get(today):
+            current = tomorrow
+        days = [current]
+        if current == today and tomorrow in report.tables and (
+                tomorrow in news or (schedule is not None and schedule.tomorrow_published)):
+            days.append(tomorrow)
+        tell = []
         for day in days:
             table = report.tables.get(day)
             if table is None:
                 continue
-            first = day.isoformat() not in self.state.sent_tables
-            if first or self.state.sent_tables[day.isoformat()] != table_to_list(table):
-                news.append(day)
+            sent = self.state.sent_tables.get(day.isoformat())
+            if sent is None and day in news:
+                tell.append(day)                    # the day's schedule is out: its table, even as it was
+            elif table_to_list(table) != (sent if sent is not None else self._last_shown(day)):
+                tell.append(day)
         delivered = True
-        if news:
-            delivered = await self.messenger.send(render_days(news, today, report, outcome))
+        if tell:
+            reasons = self._reasons(report, now, tell, schedule, restarted)
+            delivered = await self.messenger.send(render_days(tell, today, report, outcome, reasons))
             if delivered:
-                for day in news:
+                for day in tell:
                     self.state.sent_tables[day.isoformat()] = table_to_list(report.tables[day])
-                for day in news:
-                    self.journal.add("message", now, day=day.isoformat(), outcome=outcome[0])
+                    self.journal.add("message", now, day=day.isoformat(), outcome=outcome[0], reasons=reasons)
+                self.state.told = self._context(report, now)
+                self._prune_sent(today)
         elif outcome[0] == "failed":
             await self.messenger.send(render_alarm(report.table, outcome[1]))
             self.journal.add("message", now, day=None, outcome="failed")
-        if days and delivered:
+        if news and delivered:
             self.state.sent_schedule = {d.isoformat(): list(s) for d, s in schedule.days.items()}
-            self.state.sent_tables = {d: t for d, t in self.state.sent_tables.items() if d >= today.isoformat()}
+            self._prune_sent(today)
+
+    def _last_shown(self, day: date) -> Optional[list]:
+        """The table the owner last saw for a day before `day`: what a day with no message of its own is held to."""
+        earlier = [d for d in self.state.sent_tables if d < day.isoformat()]
+        return self.state.sent_tables[max(earlier)] if earlier else None
+
+    def _prune_sent(self, today: date) -> None:
+        """Days gone by are dropped, all but the last one shown."""
+        keep = {d for d in self.state.sent_tables if d >= today.isoformat()}
+        earlier = [d for d in self.state.sent_tables if d < today.isoformat()]
+        if earlier:
+            keep.add(max(earlier))
+        self.state.sent_tables = {d: t for d, t in self.state.sent_tables.items() if d in keep}
+
+    def _context(self, report: Report, now: datetime) -> dict:
+        """What a plan rested on, kept with each table message: the next one says what changed since."""
+        today = local(now).date()
+        ctx = {"at": now.isoformat(), "hour": local(now).strftime("%Y-%m-%dT%H"),
+               "fallback": report.fallback if report.kept_from is None else None}
+        if report.schedule is not None:
+            ctx["schedule"] = {d.isoformat(): list(s) for d, s in report.schedule.days.items() if d >= today}
+        if self.forecast is not None:
+            ctx["forecast_at"] = self.forecast.fetched_at.isoformat()
+            ctx["sun"] = {d.isoformat(): [round(self.forecast.total_kwh(d), 1),
+                                          round(self.forecast.total_kwh(d, pessimistic=True), 1)]
+                          for d in (today, today + timedelta(days=1)) if self.forecast.covers([d])}
+        if self.load is not None:
+            ctx["load_at"] = self.load.fetched_at.isoformat()
+            ctx["load_kwh"] = round(sum(self.load.mean.values()) / 1000, 1)
+        if report.plan is not None:
+            ctx["calibration"] = report.plan.calibration
+            ctx["soc_expected"] = {local(t).strftime("%Y-%m-%dT%H"): round(v, 1)
+                                   for t, v in report.plan.expected.soc_at.items()}
+        return ctx
+
+    def _reasons(self, report: Report, now: datetime, days: list[date], schedule: Optional[Schedule],
+                 restarted: bool) -> list[str]:
+        today = local(now).date()
+        then = dict(self.state.told) or {"schedule": self.state.sent_schedule}
+        night_over = False
+        if today in days and then.get("at"):
+            morning = datetime.combine(today, time(self.p.night_end_h), KYIV_TZ)
+            before = self.state.sent_tables.get(today.isoformat()) or self._last_shown(today)
+            after = table_to_list(report.tables[today])
+            if datetime.fromisoformat(then["at"]) < morning <= now and before and len(before) == len(after):
+                moved = [a for a, b in zip(before, after) if a != b]
+                night_over = bool(moved) and all(
+                    a[0] < self.p.night_end_h * 60 or a[0] >= self.p.night_start_h * 60 for a in moved)
+        tomorrow = today + timedelta(days=1)
+        unpublished = tomorrow if tomorrow in days and (schedule is None or not schedule.tomorrow_published) else None
+        return change_reasons(then, self._context(report, now), today, report.soc, night_over, unpublished,
+                              restarted)
 
     def _journal_replan(self, report: Report, reason: str, outcome: tuple[str, str]) -> None:
         now = report.now

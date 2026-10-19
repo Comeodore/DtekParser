@@ -36,6 +36,7 @@ class State:
     plan_at: Optional[str] = None               # when that plan was made (it is held through a short loss of inputs)
     sent_tables: dict = field(default_factory=dict)     # the table each day's last message showed, by ISO date
     sent_schedule: dict = field(default_factory=dict)   # our group's slots by ISO date, as last sent
+    told: dict = field(default_factory=dict)    # what the plan rested on at the last table message (its reasons)
     alerts: list = field(default_factory=list)  # outages the owner was warned about (battery will not last)
     seen_stamp: Optional[str] = None            # DTEK's schedule "last updated" seen by the fallback poll
     last_full: Optional[str] = None             # ISO date the battery was last seen at 99%+
