@@ -167,6 +167,11 @@ and PV charging stopped at ~2.7 kW whatever the SOC.
   tomorrow's table takes over.
 - Load history and the model ranking refresh at 00:20; Solcast at 05:34,
   08:34, 10:34, 12:34, 14:34 and 22:04.
+- The forecast is also fetched at start when the cached one is over 12 h
+  old. A new forecast keeps the hours already over as the old one had
+  them (since 19.10): 22:00 is for tomorrow's night charge, and today's
+  sun in the krem mini app no longer moves after sunset (on 19.10 a
+  restart at 20:38 took it from 5.27 to 3.51 kWh).
 
 ## Observability
 

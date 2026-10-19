@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from deye_reserve.config import ConfigError, load_config
 from deye_reserve.deye import parse_tou, tou_request
-from deye_reserve.inputs import (InputError, changed_days, combine_forecast, parse_schedule, parse_solcast,
+from deye_reserve.inputs import (Forecast, InputError, changed_days, combine_forecast, parse_schedule, parse_solcast,
                                  rank_models)
 from deye_reserve.messages import change_reasons
 from deye_reserve.net import HttpSources
@@ -402,6 +402,25 @@ async def test_forecast_refresh_times(make):
     service, _ = make()
     assert service.next_forecast_time(T(17, 15)) == T(17, 22)
     assert service.next_forecast_time(T(17, 22, 1)) == T(18, 5, 30)
+
+
+async def test_a_new_forecast_leaves_the_hours_gone_by_alone(make):
+    service, _ = make()
+    await service.refresh_forecast(T(17, 15, 30))
+    fresh, today, tomorrow = service.forecast, date(2026, 10, 17), date(2026, 10, 18)
+    # An earlier, sunnier run; the next one comes at 12:30 and rewrites only what is still ahead.
+    service.forecast = older = Forecast({k: v * 2 for k, v in fresh.p50.items()},
+                                        {k: v * 2 for k, v in fresh.pess.items()}, T(17, 5, 30), True)
+    await service.refresh_forecast(T(17, 12, 30))
+    f = service.forecast
+    assert f.fetched_at == T(17, 12, 30) and fresh.p50[(today, 11)] > 0
+    assert (f.p50[(today, 11)], f.pess[(today, 11)]) == (older.p50[(today, 11)], older.pess[(today, 11)])
+    assert (f.p50[(today, 12)], f.pess[(today, 12)]) == (fresh.p50[(today, 12)], fresh.pess[(today, 12)])
+    assert f.total_kwh(tomorrow) == fresh.total_kwh(tomorrow)
+    # 22:00: the day's sun is over, its total stays as it was; tomorrow is new.
+    await service.refresh_forecast(T(17, 22))
+    assert service.forecast.total_kwh(today) == f.total_kwh(today)
+    assert set(service.forecast.p50) == set(fresh.p50)               # nothing older piles up
 
 
 async def test_http_endpoints(make):

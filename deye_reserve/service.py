@@ -255,7 +255,7 @@ class ReserveService:
         try:
             multi, ensemble = await self.sources.weather()
             self.forecast = combine_forecast(multi, ensemble, self.cfg.pv_per_gti, now, self.top_models,
-                                             self.cfg.top_models)
+                                             self.cfg.top_models).keep_past(self.forecast, now)
             write_json(self.cfg.data_dir / "forecast.json", self.forecast.to_dict())
             self._forecast_new = True
             self._next_forecast = self.next_forecast_time(now)

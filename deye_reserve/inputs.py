@@ -4,7 +4,7 @@ from __future__ import annotations
 import statistics
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Iterable, Optional, Sequence
 
 from deye_reserve.planner import Outage
@@ -125,6 +125,21 @@ class Forecast:
     def total_kwh(self, day: date, pessimistic: bool = False, from_hour: int = 0) -> float:
         src = self.pess if pessimistic else self.p50
         return sum(v for (d, h), v in src.items() if d == day and h >= from_hour) / 1000
+
+    def keep_past(self, older: Optional["Forecast"], now: datetime) -> "Forecast":
+        """This forecast, with the hours already over as `older` had them: a new run rewrites the sun
+        that has been, which no plan looks at, and today's total would move after sunset for nothing."""
+        if older is None:
+            return self
+
+        def merged(new: dict, old: dict) -> dict:
+            out = dict(new)
+            for (d, h), v in old.items():
+                if (d, h) in out and datetime.combine(d, time(h), KYIV_TZ) + timedelta(hours=1) <= now:
+                    out[(d, h)] = v
+            return out
+        return Forecast(merged(self.p50, older.p50), merged(self.pess, older.pess), self.fetched_at,
+                        self.ensemble, self.models)
 
     def to_dict(self) -> dict:
         def pack(src):
