@@ -38,7 +38,14 @@ def table_block(table: Sequence[Slot]) -> str:
     return "<pre>" + "\n".join(rows) + "</pre>"
 
 
-def day_title(day: date, today: date) -> str:
+def day_title(day: date, today: date, last: Optional[date] = None) -> str:
+    """"на сьогодні, 19.10"; with `last`, the days from `day` to `last` share one table: "на сьогодні і завтра,
+    19–20.10"."""
+    if last is not None and last != day:
+        span = f"{day:%d}–{last:%d.%m}" if day.month == last.month else f"{day:%d.%m}–{last:%d.%m}"
+        if day == today and last == today + timedelta(days=1):
+            return f"на сьогодні і завтра, {span}"
+        return f"на {span}"
     if day == today:
         return f"на сьогодні, {day:%d.%m}"
     if day == today + timedelta(days=1):
@@ -64,12 +71,21 @@ def fallback_line(report: Report) -> str:
 
 def render_days(days: Sequence[date], today: date, report: Report, outcome: tuple[str, str],
                 reasons: Sequence[str] = ()) -> str:
-    """Each day's own final table. The one going into the inverter now gets a line only when it did not go in;
-    tomorrow's, when it is not in yet, says when it will be. Why it changed goes under it all, a line apart."""
+    """Each day's own final table; days in a row with the same table share one. The one going into the inverter
+    now gets a line only when it did not go in; tomorrow's, when it is not in yet, says when it will be. Why it
+    changed goes under it all, a line apart."""
+    groups: list[list[date]] = []
+    for day in days:
+        if groups and groups[-1][-1] + timedelta(days=1) == day and \
+                tuple(report.tables.get(day, report.table)) == tuple(report.tables.get(groups[-1][0], report.table)):
+            groups[-1].append(day)
+        else:
+            groups.append([day])
     blocks = []
-    for i, day in enumerate(days):
+    for i, group in enumerate(groups):
+        day = group[0]
         table = report.tables.get(day, report.table)
-        lines = [f"🔋 <b>Таблиця TOU {day_title(day, today)}</b>"]
+        lines = [f"🔋 <b>Таблиця TOU {day_title(day, today, group[-1])}</b>"]
         if report.fallback and i == 0:
             lines.append(fallback_line(report))
         lines.append(table_block(table))

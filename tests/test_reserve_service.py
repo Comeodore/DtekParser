@@ -789,3 +789,19 @@ async def test_the_night_gone_by_is_a_reason_of_its_own(make):
     await service.replan(clock["now"], "hourly")
     assert len(service.messenger.texts) == 2
     assert service.messenger.texts[-1].endswith("\n\nПричина: нічний заряд позаду: нічні слоти тепер на наступну ніч")
+
+
+def test_days_with_the_same_table_share_one():
+    from deye_reserve.messages import Report, render_days
+    same = safe_table(Params(), night=55)
+    report = Report(T(19, 19, 50), same, tables={date(2026, 10, 19): same, date(2026, 10, 20): same})
+    text = render_days([date(2026, 10, 19), date(2026, 10, 20)], date(2026, 10, 19), report, ("written", ""),
+                       ["змінився графік на 20.10"])
+    assert text.startswith("🔋 <b>Таблиця TOU на сьогодні і завтра, 19–20.10</b>\n<pre>00:00   55%")
+    assert text.count("<pre>") == 1 and text.endswith("</pre>\n\nПричина: змінився графік на 20.10")
+    # Different tables stay apart; a month boundary spells both months.
+    other = safe_table(Params(), night=70)
+    report.tables[date(2026, 10, 20)] = other
+    assert render_days([date(2026, 10, 19), date(2026, 10, 20)], date(2026, 10, 19), report, ("written", "")).count("<pre>") == 2
+    from deye_reserve.messages import day_title
+    assert day_title(date(2026, 10, 31), date(2026, 10, 31), date(2026, 11, 1)) == "на сьогодні і завтра, 31.10–01.11"

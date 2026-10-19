@@ -132,9 +132,11 @@ and PV charging stopped at ~2.7 kW whatever the SOC.
   Today, and tomorrow once DTEK published it or its table took over at
   the switch. A day with no message of its own is held to the last table
   shown, so midnight with the same table is quiet; so is any change that
-  leaves the table as it was. Today and tomorrow can come in one message;
-  tomorrow's says "⏭ Застосую о HH:MM" while it is not in the inverter
-  yet. No line when it is in the inverter; "⏸" when blocked, "🚨" when
+  leaves the table as it was. Today and tomorrow can come in one message,
+  as one table ("на сьогодні і завтра, 19–20.10") when they are the same:
+  they differ only by a day's own top-up, the night slots are the same
+  night. Tomorrow's says "⏭ Застосую о HH:MM" while it is not in the
+  inverter yet. No line when it is in the inverter; "⏸" when blocked, "🚨" when
   failed, plus a separate alarm when a write fails with no table news.
 - **Why**, under the table(s), a blank line apart: "Причина: …", what
   changed since the last table message (its context is kept in
