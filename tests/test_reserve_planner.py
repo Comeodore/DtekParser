@@ -184,6 +184,18 @@ def test_six_slots_from_midnight():
     assert safe_table(P) == pad(profile_table(90, [], P))
 
 
+def test_peak_shaving_leaves_the_charger_what_the_house_does_not_take():
+    # 80 A takes 4.3 kW; with the house at 1 kW the 4.5 kW import limit leaves the charger 3.5.
+    table = safe_table(P, night=95)
+    light = simulate(table, T(16, 23), T(17, 0), 20, lambda t: 200, lambda t: 0, [], P)
+    heavy = simulate(table, T(16, 23), T(17, 0), 20, lambda t: 1000, lambda t: 0, [], P)
+    assert light.buy_night == pytest.approx(4.5) and heavy.buy_night == pytest.approx(4.5)
+    per_kwh = P.charge_efficiency / P.capacity_kwh * 100
+    assert light.soc_end == pytest.approx(20 + 4.3 * per_kwh) and heavy.soc_end == pytest.approx(20 + 3.5 * per_kwh)
+    old = simulate(table, T(16, 23), T(17, 0), 20, lambda t: 200, lambda t: 0, [], replace(P, charge_kw=2.7))
+    assert old.soc_end == pytest.approx(20 + 2.7 * per_kwh)              # the 50 A of before 20.10
+
+
 def test_simulation_keeps_the_floor_while_the_grid_is_there():
     table = safe_table(P, night=60)
     sim = simulate(table, T(16, 23), T(17, 7), 50, lambda t: 500, lambda t: 0, [], P)

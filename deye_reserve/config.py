@@ -119,6 +119,7 @@ PARAM_ENV = {
     "NIGHT_START": "night_start_h", "NIGHT_END": "night_end_h", "SLOT_POWER": "slot_power_w",
     "SAFETY_LOAD_FACTOR": "safety_load_factor", "CHARGE_EFFICIENCY": "charge_efficiency",
     "PV_EFFICIENCY": "pv_efficiency", "PV_CHARGE_KW": "pv_charge_kw", "PESS_COST_WEIGHT": "pess_cost_weight",
+    "GRID_LIMIT_KW": "grid_limit_kw",
 }
 
 

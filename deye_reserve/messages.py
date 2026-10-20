@@ -181,6 +181,28 @@ def render_battery(soc: float, load_w: float, empty_at: datetime, back_at: Optio
     return "\n".join(lines)
 
 
+def render_charge(samples: Sequence[list], params) -> str:
+    """The first grid charge with Grid Charge 80 A and Grid Peak Shaving: what the grid gave, what the battery
+    took, and whether the import stayed under the limit. Samples: [at, battery W, grid W, house W, SOC]."""
+    first, last = datetime.fromisoformat(samples[0][0]), datetime.fromisoformat(samples[-1][0])
+
+    def mean(i: int) -> float:
+        return sum(s[i] for s in samples) / len(samples) / 1000
+    peak = max(s[2] for s in samples) / 1000
+    limit = params.grid_limit_kw
+    lines = ["⚡ <b>Заряд від мережі з новими налаштуваннями</b>",
+             f"Grid Charge 80 А, Peak Shaving {limit:.1f} кВт; {local(first):%H:%M}–{local(last):%H:%M}:",
+             f"Імпорт із мережі: {mean(2):.2f} кВт у середньому, найбільше {peak:.2f}",
+             f"Заряд батареї: {mean(1):.2f} кВт ({samples[0][4]:.0f} → {samples[-1][4]:.0f}%)",
+             f"Будинок: {mean(3):.2f} кВт"]
+    lines.append(f"✅ Peak Shaving тримає імпорт у межах {limit:.1f} кВт" if peak <= limit + 0.1
+                 else f"⚠️ Імпорт доходив до {peak:.2f} кВт — більше за {limit:.1f}")
+    if mean(1) < 3.0 and mean(2) < limit - 0.5:
+        lines.append("Заряд помітно менший за 80 А (~4.2 кВт), хоча до ліміту імпорту є запас: "
+                     "схоже, обмежує BMS батареї")
+    return "\n".join(lines)
+
+
 def render_alarm(table: Sequence[Slot], detail: str, current: Optional[Sequence[Slot]] = None) -> str:
     lines = ["🚨 <b>Запис TOU не вдався</b>", escape(detail), "Планувалось:", table_block(table)]
     if current is not None:

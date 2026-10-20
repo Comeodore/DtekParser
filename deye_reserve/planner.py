@@ -24,7 +24,9 @@ would cost to buy it at night.
 
 Charging and discharging follow what this battery measured (09-10.2026): the
 load gets 9.75 kWh per 100% of SOC, while filling 100% takes 12.3 kWh from the
-grid or 11.2 kWh of PV surplus.
+grid or 11.2 kWh of PV surplus. Grid charge runs at Grid Charge 80 A (since
+20.10; 50 A took 2.7 kW), held under Grid Peak Shaving: the house and the
+charger together never draw more than 4.5 kW from the grid.
 """
 from __future__ import annotations
 
@@ -46,7 +48,8 @@ class Params:
     efficiency: float = 0.95          # out of the battery: the load gets capacity x this per 100% of SOC
     charge_efficiency: float = 0.83   # into the battery from the grid (12.3 kWh per 100%)
     pv_efficiency: float = 0.91       # into the battery from PV surplus (11.2 kWh per 100%)
-    charge_kw: float = 2.7            # grid charge, grid side (Grid Charge 50 A)
+    charge_kw: float = 4.3            # grid charge, grid side (Grid Charge 80 A; 50 A took 2.7 kW)
+    grid_limit_kw: float = 4.5        # Grid Peak Shaving: the house plus the charger draw no more
     pv_charge_kw: float = 5.0         # PV surplus the battery takes at most (Max A Charge 100 A)
     shutdown_soc: float = 20.0
     outage_min_soc: float = 25.0      # pessimistic floor during scheduled outages
@@ -219,7 +222,8 @@ def simulate(tables: Tables, start: datetime, end: datetime, soc: float,
             else:
                 grid += rest
         if not absent and slot.grid_charge and soc < slot.soc:
-            rate = min(params.charge_kw, max(0.0, params.pv_charge_kw - took))
+            # `grid` is the house's draw by now: peak shaving leaves the charger the rest of the limit.
+            rate = max(0.0, min(params.charge_kw, params.pv_charge_kw - took, params.grid_limit_kw - grid))
             charge = min(rate, (slot.soc - soc) / 100 * cap / params.charge_efficiency / h)
             soc += charge * h * params.charge_efficiency / cap * 100
             grid += charge
@@ -440,7 +444,8 @@ class Planner:
                 target = min(100, max(target, math.ceil(previous.soc + short + p.charge_extra_soc)))
             if target <= at_start + 0.5 or (previous is not None and target <= previous.soc):
                 break       # already full when it starts
-            hours = (target - at_start) / 100 * p.capacity_kwh / p.charge_efficiency / p.charge_kw \
+            rate = max(0.5, min(p.charge_kw, p.grid_limit_kw - load_safe(local(a)) / 1000))
+            hours = (target - at_start) / 100 * p.capacity_kwh / p.charge_efficiency / rate \
                 + p.charge_lead_min / 60
             begin = _floor(a - timedelta(hours=hours), GRID)
             if previous is not None:

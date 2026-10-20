@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import asdict
+import statistics
+from dataclasses import asdict, replace
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional, Protocol
 
@@ -33,7 +34,7 @@ from deye_reserve.deye import ORDER_DONE, ORDER_ERRORS, ORDER_FINAL, DeyeError, 
 from deye_reserve.inputs import (Forecast, InputError, LoadProfile, Schedule, changed_days, combine_forecast,
                                  load_profile, parse_schedule, parse_solcast, rank_models)
 from deye_reserve.journal import Journal
-from deye_reserve.messages import Report, change_reasons, night_line, render_alarm, render_battery, render_days, table_line
+from deye_reserve.messages import Report, change_reasons, night_line, render_alarm, render_battery, render_charge, render_days, table_line
 from deye_reserve.planner import Inputs, Planner, Table, local, safe_table, table_now, window
 from deye_reserve.state import (load_state, read_json, save_state, table_to_list, tables_from_dict, tables_to_dict,
                                 write_json)
@@ -85,6 +86,12 @@ class ReserveService:
     KEEP_PLAN = timedelta(hours=6)
     # The battery watch during an outage: the load is the mean of this window of readings.
     WATCH_WINDOW = timedelta(minutes=30)
+    # Grid charging seen by the watch: the battery taking this much with the grid on and no sun to speak of.
+    CHARGE_MIN_W = 1000
+    CHARGE_SAMPLE_DAYS = 7
+    CHARGE_MIN_SAMPLES = 10         # fewer, and the configured charge rate stands
+    CHARGE_GAP = timedelta(minutes=10)
+    CHARGE_REPORT_MIN = 20          # the first charge with the new settings is told after this long
 
     def __init__(self, config: Config, sources: Sources, deye: Deye, messenger: Messenger,
                  clock=now_kyiv, sleep=asyncio.sleep, solcast: Optional[SolcastSource] = None):
@@ -127,6 +134,7 @@ class ReserveService:
         self._next_switch: Optional[datetime] = None       # tomorrow's table takes over
         self._next_watch = now
         self._readings: list[tuple[datetime, float, float]] = []    # (at, load W, PV W)
+        self._charge_run: list[list] = []                             # the grid charge under way, as samples
         self._off_since: Optional[datetime] = None
 
     # ---- caches ----
@@ -392,6 +400,7 @@ class ReserveService:
         if report.fallback is None:
             inputs = Inputs(now, float(reading["soc"]), schedule.outages, self.load.mean, self.load.p80,
                             self.forecast.p50, self.forecast.pess, self.calibrate(now))
+            self.planner.p = replace(self.p, charge_kw=self.charge_kw())
             plan = self.planner.plan(inputs, tables_from_dict(self.state.previous_tables))
             report.plan, report.table, report.tables, report.switch_at = plan, plan.table, plan.tables, plan.switch_at
             self.state.previous_tables, self.state.plan_at = tables_to_dict(plan.tables), now.isoformat()
@@ -575,6 +584,7 @@ class ReserveService:
                         "soc_end": round(s.soc_end, 1), "unserved": round(s.unserved, 2),
                         "min_by": {p.outages[k][0].isoformat(): round(v, 1) for k, v in s.min_by.items()}}
             row.update(night=p.night, safe=p.safe, kept_previous=p.kept_previous, calibration=p.calibration,
+                       charge_kw=self.planner.p.charge_kw,
                        window=[p.start.isoformat(), p.end.isoformat()], expected=sim(p.expected),
                        pessimistic=sim(p.pessimistic), price=round(p.price, 2),
                        baseline_cost_adj=round(p.baseline.expected.cost_adj, 2) if p.baseline else None,
@@ -604,6 +614,7 @@ class ReserveService:
         if not self._readings or self._readings[-1][0] != at:
             self._readings.append((at, float(reading.get("load_w") or 0), float(reading.get("pv_w") or 0)))
         self._readings = [r for r in self._readings if r[0] >= now - self.WATCH_WINDOW]
+        await self._watch_charge(reading, at, now)
         if reading.get("grid_present") is not False:
             self._off_since = None
             return
@@ -630,6 +641,46 @@ class ReserveService:
                              back=back.isoformat() if back else None, key=key)
             logger.warning(f"battery alert: {soc:.0f}% at {net:.0f} W lasts until {local(empty):%H:%M}")
             self._save()
+
+    def charge_kw(self) -> float:
+        """The grid charge rate to plan with: the median the charger reached over the last week (below 90%,
+        before the BMS tapers), never above the configured one; the configured one until there are enough."""
+        rates = [s[1] for s in self.state.charge_samples if s[4] <= 90]
+        if len(rates) < self.CHARGE_MIN_SAMPLES:
+            return self.p.charge_kw
+        return min(self.p.charge_kw, round(statistics.median(rates) / 1000, 2))
+
+    async def _watch_charge(self, reading: dict, at: datetime, now: datetime) -> None:
+        """Grid charging (the grid on, the battery taking 1 kW+, next to no sun) is kept as samples of the
+        charge rate; the first charge since 80 A and peak shaving at 4.5 kW is told once, after 20 minutes
+        (or when it ends sooner)."""
+        battery, pv = float(reading.get("battery_w") or 0), float(reading.get("pv_w") or 0)
+        charging = reading.get("grid_present") is True and battery >= self.CHARGE_MIN_W and pv < 300
+        if charging and (not self.state.charge_samples or self.state.charge_samples[-1][0] != at.isoformat()):
+            sample = [at.isoformat(), battery, float(reading.get("grid_w") or 0),
+                      float(reading.get("load_w") or 0), float(reading["soc"])]
+            cutoff = now - timedelta(days=self.CHARGE_SAMPLE_DAYS)
+            self.state.charge_samples = [s for s in self.state.charge_samples
+                                         if datetime.fromisoformat(s[0]) >= cutoff] + [sample]
+            self.journal.add("charge", now, reading_at=sample[0], battery_w=battery, grid_w=sample[2],
+                             load_w=sample[3], soc=sample[4])
+            if self._charge_run and at - datetime.fromisoformat(self._charge_run[-1][0]) > self.CHARGE_GAP:
+                self._charge_run = []
+            self._charge_run.append(sample)
+            self._save()
+        run = self._charge_run
+        if not run:
+            return
+        span = datetime.fromisoformat(run[-1][0]) - datetime.fromisoformat(run[0][0])
+        if charging and span < timedelta(minutes=self.CHARGE_REPORT_MIN):
+            return
+        if self.state.charge_report_due and (charging or len(run) >= 3):
+            if await self.messenger.send(render_charge(run, self.p)):
+                self.state.charge_report_due = False
+                self.journal.add("message", now, day=None, outcome="charge report", samples=len(run))
+                logger.info(f"first grid charge with the new settings told ({len(run)} samples)")
+                self._save()
+        self._charge_run = []
 
     async def _scheduled_outage(self, now: datetime):
         """The scheduled outage the house is in now (one that should have started up to 30 min ago counts)."""
@@ -768,6 +819,8 @@ class ReserveService:
             "next_switch": self._next_switch.isoformat() if self._next_switch else None,
             "watch": {"readings": len(self._readings), "off_since": self._off_since.isoformat() if self._off_since else None},
             "deye_calls": getattr(self.deye, "calls", None),
+            "charge": {"kw": self.charge_kw(), "samples": len(self.state.charge_samples),
+                       "report_due": self.state.charge_report_due},
         }
 
     def plan_payload(self) -> Optional[dict]:

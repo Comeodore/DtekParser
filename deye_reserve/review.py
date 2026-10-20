@@ -50,6 +50,8 @@ def decisions(rows: list[dict]) -> list[str]:
             out.append(f"{_hm(_t(row['at']))} MESSAGE day {row.get('day')} ({row.get('outcome')})"
                        + (f": {'; '.join(row['reasons'])}" if row.get("reasons") else ""))
             continue
+        if row["kind"] == "charge":
+            continue        # grid-charge samples: the rate, in /health and state.json
         if row["kind"] == "alert":
             out.append(f"{_hm(_t(row['at']))} BATTERY ALERT soc {row.get('soc')} at {row.get('load_w')} W, "
                        f"empty ~{_t(row['empty']):%H:%M}, grid due {_t(row['back']):%H:%M}" if row.get("back") else

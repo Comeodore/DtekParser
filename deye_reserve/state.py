@@ -46,6 +46,8 @@ class State:
     writes: dict = field(default_factory=dict)  # ISO date -> write attempts
     last_write: Optional[dict] = None
     solcast_calls: dict = field(default_factory=dict)   # UTC date -> Solcast calls made
+    charge_samples: list = field(default_factory=list)  # grid charging seen: [at, battery W, grid W, house W, SOC]
+    charge_report_due: bool = True              # the first grid charge since 80 A / peak shaving 4.5 kW is told once
 
     def writes_on(self, day: date) -> int:
         return int(self.writes.get(day.isoformat(), 0))

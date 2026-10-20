@@ -28,7 +28,7 @@ In order of priority:
 | | |
 |---|---|
 | Inverter | Deye single-phase hybrid 6 kW AC, SN 2511090098, productId 0_5407_1, max PV input 7.8 kW; Deye station 61918417 |
-| Battery | 2 × Deye SE-G5.1 Pro-B = 10.24 kWh; shutdown 20%; Max A Charge 100 A, Grid Charge 50 A (the owner keeps 50 A: the grid breaker is unknown) |
+| Battery | 2 × Deye SE-G5.1 Pro-B = 10.24 kWh; shutdown 20%; Max A Charge 100 A, Grid Charge 80 A with Grid Peak Shaving 4.5 kW (since 20.10 15:49; 50 A before, the grid breaker being unknown) |
 | Panels | 11 × 615 W = 6.77 kWp, south roof slope (ridge runs west–east), tilt ≈ 30° |
 | Site | 50.3084, 30.4067 (Круглик, Kyiv region), DTEK queue GPV2.2 (krem) |
 | Wiring | the whole house, router included, is on the Load port; the logger keeps reporting through outages |
@@ -39,8 +39,11 @@ In order of priority:
 Measured on this battery (Deye history 09–10.2026): the load gets 9.75 kWh
 per 100% of SOC; filling 100% takes 11.75 kWh at the battery, i.e. 12.3 kWh
 from the grid or 11.2 kWh of PV surplus. Grid charging runs at ~2.6 kW into
-the battery (2.9 kW drawn with the house). Until 18.10 Max A Charge was 50 A
-and PV charging stopped at ~2.7 kW whatever the SOC.
+the battery (2.9 kW drawn with the house) at the old 50 A. Until 18.10 Max A
+Charge was 50 A and PV charging stopped at ~2.7 kW whatever the SOC; with
+100 A the sun charged 3.0 kW on 20.10 at 93–97%, so the BMS does not hold it
+at 2.7. Since 20.10 Grid Charge is 80 A (~4.3 kW) and Grid Peak Shaving keeps
+the whole import, house and charger, under 4.5 kW.
 
 ## Inputs
 
@@ -83,8 +86,8 @@ and PV charging stopped at ~2.7 kW whatever the SOC.
   past today). A charge for tomorrow therefore never runs today.
 - **Simulation**, 5-min steps, with the measured battery: with the grid
   present the battery is not discharged below the slot's SOC and, with
-  grid charge on, is charged up to it at 2.7 kW from the grid (0.83 into
-  SOC); PV first covers the load, then charges the battery (0.91, up to
+  grid charge on, is charged up to it at 4.3 kW from the grid (80 A), or
+  what the 4.5 kW import limit leaves after the house (0.83 into SOC); PV first covers the load, then charges the battery (0.91, up to
   5 kW); what does not fit is lost; out of the battery 0.95. During an
   outage it runs down to 20%.
 - **Two scenarios**: expected (mean load, P50 sun) and pessimistic
@@ -101,7 +104,15 @@ and PV charging stopped at ~2.7 kW whatever the SOC.
   outages.
 - **Just-in-time charge**: an outage the night charge cannot cover gets a
   grid-charge slot right before it, in its own day's table: start = outage
-  start − missing energy / 2.7 kW − 30 min, on a 15-min grid.
+  start − missing energy / min(4.3 kW, 4.5 kW − the house's safe load) −
+  30 min, on a 15-min grid.
+- **Charge rate as measured**: every 3-min reading with the grid on, the
+  battery taking ≥1 kW and next to no sun is a grid-charge sample
+  (journal `charge`, state.json `charge_samples`, 7 days). From 10 samples
+  below 90% the plan charges at their median, never above the configured
+  4.3 kW (`/health` → `charge`). The first grid charge after the 20.10
+  change is told once in the chat after 20 minutes: import, battery
+  charge, the house, and whether peak shaving held 4.5 kW.
 - **Six slots** per table: extra breakpoints are dropped where that costs
   least, missing ones are added by splitting the longest stretch.
 - **Stickiness**: the previous tables stay unless the new ones are cheaper

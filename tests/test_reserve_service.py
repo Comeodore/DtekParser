@@ -9,7 +9,7 @@ from deye_reserve.config import ConfigError, load_config
 from deye_reserve.deye import parse_tou, tou_request
 from deye_reserve.inputs import (Forecast, InputError, changed_days, combine_forecast, parse_schedule, parse_solcast,
                                  rank_models)
-from deye_reserve.messages import change_reasons, night_line
+from deye_reserve.messages import change_reasons, night_line, render_charge
 from deye_reserve.net import HttpSources
 from deye_reserve.planner import Params, Slot, safe_table
 from deye_reserve.review import actual, decisions, solcast_lines
@@ -850,3 +850,42 @@ async def test_the_reason_is_what_changed_since_the_replan_before(make):
     # Before 07:00 the night under way is today's.
     assert night_line({"sun": {"2026-10-17": [3.84, 1.6]}}, date(2026, 10, 17)) == \
         "ніч під 17.10: прогноз сонця 3.8 кВт·год (песимістично 1.6)"
+
+
+# ---- grid charging: the rate it really reaches, and the first one with 80 A told once ----
+
+async def test_grid_charging_is_sampled_and_the_first_one_told_once(make):
+    service, clock = make(now=T(20, 23))
+    assert service.charge_kw() == service.p.charge_kw == 4.3 and service.state.charge_report_due
+    soc = 52.0
+    for _ in range(8):                                               # 23:03 .. 23:24, every 3 min
+        clock["now"] += timedelta(minutes=3)
+        service.sources.reading = {"soc": soc, "grid_present": True, "battery_w": 4150.0, "grid_w": 4440.0,
+                                   "load_w": 290.0, "pv_w": 0.0, "at": (clock["now"] - timedelta(seconds=30)).isoformat()}
+        await service.watch(clock["now"])
+        soc += 1.2
+    assert len(service.messenger.texts) == 1 and not service.state.charge_report_due
+    text = service.messenger.texts[0]
+    assert text.startswith("⚡ <b>Заряд від мережі з новими налаштуваннями</b>\nGrid Charge 80 А, Peak Shaving 4.5 кВт; 23:02–23:2")
+    assert "Імпорт із мережі: 4.44 кВт у середньому, найбільше 4.44" in text and "Заряд батареї: 4.15 кВт (52 → " in text
+    assert text.endswith("✅ Peak Shaving тримає імпорт у межах 4.5 кВт")
+    assert len([r for r in service.journal.read() if r["kind"] == "charge"]) == 8
+    # Told once: the rest of the night is quiet, and from 10 samples the plan takes the rate measured.
+    for _ in range(4):
+        clock["now"] += timedelta(minutes=3)
+        service.sources.reading = {**service.sources.reading, "at": (clock["now"] - timedelta(seconds=30)).isoformat()}
+        await service.watch(clock["now"])
+    assert len(service.messenger.texts) == 1 and service.charge_kw() == 4.15
+    # No grid, or sun on the panels: not a grid charge.
+    service.sources.reading = {**service.sources.reading, "grid_present": False, "at": clock["now"].isoformat()}
+    await service._watch_charge(service.sources.reading, clock["now"], clock["now"])
+    assert len(service.state.charge_samples) == 12
+
+
+def test_a_charge_capped_below_80_a_points_at_the_bms():
+    samples = [["2026-10-21T23:0%d:00+03:00" % i, 2700.0, 2950.0, 250.0, 50.0 + i] for i in range(4)]
+    text = render_charge(samples, Params())
+    assert "Заряд батареї: 2.70 кВт (50 → 53%)" in text and "✅ Peak Shaving" in text
+    assert text.endswith("схоже, обмежує BMS батареї")
+    over = render_charge([[s[0], 4300.0, 4800.0, 500.0, s[4]] for s in samples], Params())
+    assert "⚠️ Імпорт доходив до 4.80 кВт — більше за 4.5" in over and "BMS" not in over
