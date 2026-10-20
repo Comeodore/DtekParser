@@ -33,7 +33,7 @@ from deye_reserve.deye import ORDER_DONE, ORDER_ERRORS, ORDER_FINAL, DeyeError, 
 from deye_reserve.inputs import (Forecast, InputError, LoadProfile, Schedule, changed_days, combine_forecast,
                                  load_profile, parse_schedule, parse_solcast, rank_models)
 from deye_reserve.journal import Journal
-from deye_reserve.messages import Report, change_reasons, render_alarm, render_battery, render_days, table_line
+from deye_reserve.messages import Report, change_reasons, night_line, render_alarm, render_battery, render_days, table_line
 from deye_reserve.planner import Inputs, Planner, Table, local, safe_table, table_now, window
 from deye_reserve.state import (load_state, read_json, save_state, table_to_list, tables_from_dict, tables_to_dict,
                                 write_json)
@@ -453,14 +453,15 @@ class ReserveService:
             elif table_to_list(table) != (sent if sent is not None else self._last_shown(day)):
                 tell.append(day)
         delivered = True
+        ctx = self._context(report, now)
         if tell:
-            reasons = self._reasons(report, now, tell, schedule, restarted)
+            reasons = self._reasons(report, now, tell, schedule, restarted, ctx)
             delivered = await self.messenger.send(render_days(tell, today, report, outcome, reasons))
             if delivered:
                 for day in tell:
                     self.state.sent_tables[day.isoformat()] = table_to_list(report.tables[day])
                     self.journal.add("message", now, day=day.isoformat(), outcome=outcome[0], reasons=reasons)
-                self.state.told = self._context(report, now)
+                self.state.told = ctx
                 self._prune_sent(today)
         elif outcome[0] == "failed":
             await self.messenger.send(render_alarm(report.table, outcome[1]))
@@ -468,6 +469,8 @@ class ReserveService:
         if news and delivered:
             self.state.sent_schedule = {d.isoformat(): list(s) for d, s in schedule.days.items()}
             self._prune_sent(today)
+        if delivered:
+            self.state.plan_ctx = ctx
 
     def _last_shown(self, day: date) -> Optional[list]:
         """The table the owner last saw for a day before `day`: what a day with no message of its own is held to."""
@@ -504,22 +507,42 @@ class ReserveService:
         return ctx
 
     def _reasons(self, report: Report, now: datetime, days: list[date], schedule: Optional[Schedule],
-                 restarted: bool) -> list[str]:
+                 restarted: bool, ctx: dict) -> list[str]:
+        """Why the tables changed: what changed since the replan before, which still had the old ones (else
+        since the last table message); the battery against what that message's plan expected; and, when the
+        night moved, the day it is for with that day's sun."""
         today = local(now).date()
-        then = dict(self.state.told) or {"schedule": self.state.sent_schedule}
-        night_over = False
-        if today in days and then.get("at"):
-            morning = datetime.combine(today, time(self.p.night_end_h), KYIV_TZ)
-            before = self.state.sent_tables.get(today.isoformat()) or self._last_shown(today)
-            after = table_to_list(report.tables[today])
-            if datetime.fromisoformat(then["at"]) < morning <= now and before and len(before) == len(after):
-                moved = [a for a, b in zip(before, after) if a != b]
-                night_over = bool(moved) and all(
-                    a[0] < self.p.night_end_h * 60 or a[0] >= self.p.night_start_h * 60 for a in moved)
         tomorrow = today + timedelta(days=1)
+        told = dict(self.state.told) or {"schedule": self.state.sent_schedule}
+        previous = dict(self.state.plan_ctx) or None
+
+        def night_slot(start: int) -> bool:
+            return start < self.p.night_end_h * 60 or start >= self.p.night_start_h * 60
+
+        def moved(day: date) -> Optional[list[int]]:
+            """The slots of a day's table that changed against what the chat showed; None: all of them."""
+            before = self.state.sent_tables.get(day.isoformat()) or self._last_shown(day)
+            after = table_to_list(report.tables[day])
+            if not before or len(before) != len(after):
+                return None
+            return [a[0] for a, b in zip(before, after) if a != b]
+
+        changed = {day: moved(day) for day in days}
+        morning = datetime.combine(today, time(self.p.night_end_h), KYIV_TZ)
+        only_night = today in changed and bool(changed[today]) and all(night_slot(m) for m in changed[today])
         unpublished = tomorrow if tomorrow in days and (schedule is None or not schedule.tomorrow_published) else None
-        return change_reasons(then, self._context(report, now), today, report.soc, night_over, unpublished,
-                              restarted)
+        expected = told.get("soc_expected", {}).get(ctx.get("hour"))
+
+        def since(then: dict, generic: bool) -> list[str]:
+            night_over = only_night and bool(then.get("at")) and datetime.fromisoformat(then["at"]) < morning <= now
+            return change_reasons(then, ctx, today, report.soc, night_over, unpublished, restarted, expected, generic)
+
+        out = since(previous, False) if previous else []
+        if not out:
+            out = since(told, False) or since(previous or told, True)
+        if any(m is None or any(night_slot(s) for s in m) for m in changed.values()):
+            out.append(night_line(ctx, today if local(now).hour < self.p.night_end_h else tomorrow))
+        return out
 
     def _journal_replan(self, report: Report, reason: str, outcome: tuple[str, str]) -> None:
         now = report.now

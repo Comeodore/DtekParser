@@ -111,10 +111,12 @@ SOC_STEP = 5.0          # % off the plan the last message had
 
 
 def change_reasons(then: dict, ctx: dict, today: date, soc: Optional[float], night_over: bool = False,
-                   unpublished: Optional[date] = None, restarted: bool = False) -> list[str]:
-    """What changed between the context of the last message (`then`) and now (`ctx`) — see
+                   unpublished: Optional[date] = None, restarted: bool = False,
+                   expected_soc: Optional[float] = None, generic: bool = True) -> list[str]:
+    """What changed between `then` (the replan before, or the last table message) and now (`ctx`) — see
     ReserveService._context. `night_over`: a night ended since, and only the night slots changed;
-    `unpublished`: tomorrow's table goes out with no DTEK schedule for it yet."""
+    `unpublished`: tomorrow's table goes out with no DTEK schedule for it yet; `expected_soc`: the
+    battery the plan last shown in the chat expected by now. Without `generic`, nothing found is []."""
     if ctx.get("fallback"):
         return ["немає даних для плану"]
     out = []
@@ -135,7 +137,8 @@ def change_reasons(then: dict, ctx: dict, today: date, soc: Optional[float], nig
     if then.get("calibration") is False and ctx.get("calibration"):
         out.append("калібрувальний заряд до 100%")
     elif then.get("calibration") and ctx.get("calibration") is False:
-        out.append("калібрування вже не потрібне")
+        out.append("батарея зарядилась до 100%: калібрування вже не потрібне" if soc is not None and soc >= 99
+                   else "калібрування вже не потрібне")
     if night_over:
         out.append("нічний заряд позаду: нічні слоти тепер на наступну ніч")
     sun_new = then.get("forecast_at") and ctx.get("forecast_at") and then["forecast_at"] != ctx["forecast_at"]
@@ -148,10 +151,9 @@ def change_reasons(then: dict, ctx: dict, today: date, soc: Optional[float], nig
     if then.get("load_at") and ctx.get("load_at") and then["load_at"] != ctx["load_at"] and \
             abs(ctx["load_kwh"] - then["load_kwh"]) >= LOAD_STEP:
         out.append(f"споживання будинку: {then['load_kwh']:.1f} → {ctx['load_kwh']:.1f} кВт·год на добу")
-    expected = then.get("soc_expected", {}).get(ctx.get("hour"))
-    if soc is not None and expected is not None and abs(soc - expected) >= SOC_STEP:
-        out.append(f"заряд {soc:.0f}% замість очікуваних {expected:.0f}%")
-    if not out:
+    if soc is not None and expected_soc is not None and abs(soc - expected_soc) >= SOC_STEP:
+        out.append(f"заряд {soc:.0f}% замість очікуваних {expected_soc:.0f}%")
+    if not out and generic:
         if sun_new:
             out.append("оновився прогноз сонця")
         elif restarted:
@@ -159,6 +161,14 @@ def change_reasons(then: dict, ctx: dict, today: date, soc: Optional[float], nig
         else:
             out.append(f"перерахунок за поточним зарядом {soc:.0f}%" if soc is not None else "перерахунок плану")
     return out
+
+
+def night_line(ctx: dict, day: date) -> str:
+    """The day a night's charge is for, with that day's sun: the charge is about it, not about today."""
+    sun = ctx.get("sun", {}).get(day.isoformat())
+    if not sun:
+        return f"ніч під {day:%d.%m}"
+    return f"ніч під {day:%d.%m}: прогноз сонця {sun[0]:.1f} кВт·год (песимістично {sun[1]:.1f})"
 
 
 def render_battery(soc: float, load_w: float, empty_at: datetime, back_at: Optional[datetime]) -> str:

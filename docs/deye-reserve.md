@@ -139,16 +139,25 @@ and PV charging stopped at ~2.7 kW whatever the SOC.
   inverter yet. No line when it is in the inverter; "⏸" when blocked, "🚨" when
   failed, plus a separate alarm when a write fails with no table news.
 - **Why**, under the table(s), a blank line apart: "Причина: …", what
-  changed since the last table message (its context is kept in
-  state.json `told`): DTEK published / changed / withdrew a day; tomorrow
-  not published yet (a plan without outages); calibration on or done; the
-  night gone by (after 07:00 only the night slots changed: they now serve
-  the coming night); the sun forecast per day (P50 and pessimistic, when
+  changed since the replan before, which still had the old table
+  (state.json `plan_ctx`); only when nothing did, since the last table
+  message (`told`): DTEK published / changed / withdrew a day; tomorrow
+  not published yet (a plan without outages); calibration on or done
+  ("батарея зарядилась до 100%: калібрування вже не потрібне"); the night
+  gone by (after 07:00 only the night slots changed: they now serve the
+  coming night); the sun forecast per day (P50 and pessimistic, when
   either moved ≥ 0.3 kWh); the house's weekly load (≥ 0.3 kWh/day); the
   battery ≥ 5% off what the last message's plan expected for this hour;
   no data for a plan / data back. With none of these: a new forecast,
-  a restart, or "перерахунок за поточним зарядом N%". Expect about 1–3
-  extra messages a day, the morning night change among them.
+  a restart, or "перерахунок за поточним зарядом N%". When the night
+  slots moved, the last item says which day the night is for and its sun:
+  "ніч під 21.10: прогноз сонця 8.0 кВт·год (песимістично 5.0)" (after
+  07:00 the night ahead is tomorrow's). Until 20.10 the reason was the
+  whole diff since the last message: at 12:45 it listed a schedule change
+  of 23:14 the evening before and today's sun, while the night moved
+  50 → 60% because the battery reached 100% and the calibration ended.
+  Expect about 1–3 extra messages a day, the morning night change among
+  them.
 - **The battery during an outage** ("🪫 Батареї може не вистачити до
   світла"): every 3 min the reading is looked at; without the grid, if at
   the house's load (mean of the last 30 min, minus PV) the battery reaches
