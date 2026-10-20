@@ -87,9 +87,11 @@ async def test_hook_posts_and_never_raises():
     ReserveHook(None).fire("grid", "lost")                          # not configured: nothing at all
 
 
-def test_the_inverter_reports_its_day_of_sun():
-    assert parse_device_latest(device(), 100).pv_today_kwh == 1.7
-    assert parse_device_latest(device(), 100).to_dict(kyiv(2026, 10, 16, 17, 25), 900)["pv_today_kwh"] == 1.7
+def test_the_inverter_reports_its_day_of_sun_and_grid():
+    reading = parse_device_latest(device(), 100)
+    assert (reading.pv_today_kwh, reading.grid_today_kwh) == (1.7, 8.0)
+    day = reading.to_dict(kyiv(2026, 10, 16, 17, 25), 900)
+    assert (day["pv_today_kwh"], day["grid_today_kwh"]) == (1.7, 8.0)
 
 
 def test_the_krem_mini_app_gets_todays_sun_forecast(monkeypatch):

@@ -400,13 +400,14 @@
         .hub-home.src-grid { border-color: var(--text-on); }
         .hub-home.src-battery { border-color: var(--text-off); }
         .hub-home.src-sun { border-color: var(--text-sun); }
-        /* Today's sun in the diagram's top corner: what the panels gave so far against the day's forecast. */
+        /* Today in the diagram's top corners: what the grid gave so far on its side, and what the panels
+           gave against the day's forecast on the other. */
         #inverter { position: relative; }
-        .sun-day { position: absolute; top: 10px; right: 12px; text-align: right; white-space: nowrap;
-            font-variant-numeric: tabular-nums; }
-        .sun-day-value { font-size: 13px; font-weight: 700; color: var(--text-secondary); }
-        .sun-day-value .sun { color: var(--text-sun); }
-        .sun-day-label { font-size: 10px; color: var(--text-secondary); margin-top: 1px; }
+        .day-total { position: absolute; top: 10px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+        .day-total.grid-side { left: 12px; }
+        .day-total.sun-side { right: 12px; text-align: right; }
+        .day-total-value { font-size: 13px; font-weight: 700; color: var(--text-secondary); }
+        .day-total-label { font-size: 10px; color: var(--text-secondary); margin-top: 1px; }
         /* A link is grey and arrowless while nothing flows; its colour and arrow say what does and where. */
         .hub-link { flex: 1; display: flex; align-items: center; color: var(--divider); }
         .hub-link .line { flex: 1; height: 2px; background: currentColor; }
@@ -490,9 +491,13 @@
                 <div class="batteries-stats" id="batteriesStats"></div>
             </div>
             <div class="inverter hidden" id="inverter">
-                <div class="sun-day hidden" id="sunDay">
-                    <div class="sun-day-value" id="sunDayValue"></div>
-                    <div class="sun-day-label" id="sunDayLabel"></div>
+                <div class="day-total grid-side hidden" id="gridDay">
+                    <div class="day-total-value" id="gridDayValue"></div>
+                    <div class="day-total-label" id="gridDayLabel"></div>
+                </div>
+                <div class="day-total sun-side hidden" id="sunDay">
+                    <div class="day-total-value" id="sunDayValue"></div>
+                    <div class="day-total-label" id="sunDayLabel"></div>
                 </div>
                 <div class="hub">
                     <div class="hub-node" id="hubSun">
@@ -584,7 +589,7 @@
                 solar: 'Solar',
                 kwh: 'kWh',
                 sunOf: 'of',
-                sunToday: 'today',
+                kwhToday: 'today',
                 sunForecast: 'forecast',
                 inverter: 'Last data update',
                 watt: 'W',
@@ -627,7 +632,7 @@
                 solar: 'Сонце',
                 kwh: 'кВт·год',
                 sunOf: 'з',
-                sunToday: 'сьогодні',
+                kwhToday: 'сьогодні',
                 sunForecast: 'прогноз',
                 inverter: 'Останнє оновлення інформації',
                 watt: 'Вт',
@@ -790,10 +795,19 @@
         // Below this the flow is noise: a battery or grid this close to zero counts as idle.
         const IDLE_W = 50;
 
-        // The diagram's top corner: what the panels gave today against deye-reserve's forecast for the
+        const kwh = v => (v >= 10 ? v.toFixed(0) : v.toFixed(1));
+
+        // The diagram's top-left corner: what the grid gave today ("4.2", "kWh today").
+        const renderGridDay = done => {
+            $('gridDay').classList.toggle('hidden', done == null);
+            if (done == null) return;
+            $('gridDayValue').innerHTML = `<span class="on">${kwh(done)}</span>`;
+            $('gridDayLabel').textContent = `${t('kwh')} ${t('kwhToday')}`;
+        };
+
+        // The top-right one: what the panels gave today against deye-reserve's forecast for the
         // whole day ("1.7 of 3.8", "kWh today"); either half alone when the other is missing.
         const renderSunDay = (done, forecast) => {
-            const kwh = v => (v >= 10 ? v.toFixed(0) : v.toFixed(1));
             const hasDone = done != null, hasForecast = forecast != null && forecast > 0;
             $('sunDay').classList.toggle('hidden', !hasDone && !hasForecast);
             const value = $('sunDayValue');
@@ -804,7 +818,7 @@
             } else if (hasForecast) {
                 value.textContent = `≈${kwh(forecast)}`;
             }
-            $('sunDayLabel').textContent = `${t('kwh')} ${hasDone ? t('sunToday') : t('sunForecast')}`;
+            $('sunDayLabel').textContent = `${t('kwh')} ${hasDone ? t('kwhToday') : t('sunForecast')}`;
         };
 
         // Only the source the inverter belongs to (krem) gets data.inverter: the house in the middle,
@@ -830,6 +844,7 @@
             node('hubGrid', !inv.grid_present ? t('gridOff') : fromGrid ? formatPower(fromGrid) : t('gridOn'),
                 inv.grid_present ? 'on' : 'off');
             $('hubGridLink').className = fromGrid ? 'hub-link to-home on' : 'hub-link';
+            renderGridDay(inv.grid_today_kwh);
 
             node('hubSun', watts(inv.pv_w), fromSun ? 'sun' : 'muted');
             $('hubSunLink').className = fromSun ? 'hub-vline to-home sun' : 'hub-vline';
