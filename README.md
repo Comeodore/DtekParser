@@ -15,7 +15,11 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
 - **Inverter (krem).** It reads the Deye inverter in Круглик from Deye Cloud
   (`device/latest`) and shows in the krem mini app where the house's power
   comes from: the house in the middle, sun, grid and battery around it, the
-  links coloured and arrowed by what flows where. When the inverter loses or
+  links coloured and arrowed by what flows where. Its top corners show today:
+  the panels' output against the forecast, and what the grid gave, split
+  night (23-07, deye-reserve's `DEYE_RESERVE_NIGHT_*`) / day from Deye's
+  daily counter at those hours (kept in `data/grid-day-krem.json`; the total
+  alone when an hour was missed). When the inverter loses or
   regains the grid it messages the krem chats the way the Victron does for
   kem: duration, battery, and whether the schedule has power off now (with
   its end) or the outage is unscheduled (`DEYE_NOTIFY_GRID`; state in

@@ -28,6 +28,7 @@
             --text-off: var(--status-off);
             --stat-off: var(--power-off);
             --text-sun: #ffd60a;
+            --text-night: #9a98ff;
             --text-warn: #ff9f0a;
             --hub-node-bg: rgba(127, 127, 127, 0.14);
             --radius-lg: 14px;
@@ -43,6 +44,7 @@
         /* Bright yellow vanishes on Telegram's light greys; a deeper gold keeps it yellow but visible. */
         html.light {
             --text-sun: #c99700;
+            --text-night: #5856d6;
         }
 
         * {
@@ -363,6 +365,7 @@
         .inverter .on { color: var(--text-on); }
         .inverter .off { color: var(--text-off); }
         .inverter .sun { color: var(--text-sun); }
+        .inverter .night { color: var(--text-night); }
         .inverter .muted { color: var(--text-secondary); }
 
         /* krem: where the house's power comes from right now */
@@ -590,6 +593,8 @@
                 kwh: 'kWh',
                 sunOf: 'of',
                 kwhToday: 'today',
+                night: 'night',
+                day: 'day',
                 sunForecast: 'forecast',
                 inverter: 'Last data update',
                 watt: 'W',
@@ -633,6 +638,8 @@
                 kwh: 'кВт·год',
                 sunOf: 'з',
                 kwhToday: 'сьогодні',
+                night: 'ніч',
+                day: 'день',
                 sunForecast: 'прогноз',
                 inverter: 'Останнє оновлення інформації',
                 watt: 'Вт',
@@ -797,12 +804,16 @@
 
         const kwh = v => (v >= 10 ? v.toFixed(0) : v.toFixed(1));
 
-        // The diagram's top-left corner: what the grid gave today ("4.2", "kWh today").
-        const renderGridDay = done => {
+        // The diagram's top-left corner: what the grid gave today, the cheap night first, then the day
+        // ("2.1 / 5.5", "night / day"); the total alone ("7.6", "kWh today") until the split is known.
+        const renderGridDay = (done, night, day) => {
             $('gridDay').classList.toggle('hidden', done == null);
             if (done == null) return;
-            $('gridDayValue').innerHTML = `<span class="on">${kwh(done)}</span>`;
-            $('gridDayLabel').textContent = `${t('kwh')} ${t('kwhToday')}`;
+            const split = night != null && day != null;
+            $('gridDayValue').innerHTML = split
+                ? `<span class="night">${kwh(night)}</span> / <span class="on">${kwh(day)}</span>`
+                : `<span class="on">${kwh(done)}</span>`;
+            $('gridDayLabel').textContent = split ? `${t('night')} / ${t('day')}` : `${t('kwh')} ${t('kwhToday')}`;
         };
 
         // The top-right one: what the panels gave today against deye-reserve's forecast for the
@@ -844,7 +855,7 @@
             node('hubGrid', !inv.grid_present ? t('gridOff') : fromGrid ? formatPower(fromGrid) : t('gridOn'),
                 inv.grid_present ? 'on' : 'off');
             $('hubGridLink').className = fromGrid ? 'hub-link to-home on' : 'hub-link';
-            renderGridDay(inv.grid_today_kwh);
+            renderGridDay(inv.grid_today_kwh, inv.grid_night_kwh, inv.grid_day_kwh);
 
             node('hubSun', watts(inv.pv_w), fromSun ? 'sun' : 'muted');
             $('hubSunLink').className = fromSun ? 'hub-vline to-home sun' : 'hub-vline';

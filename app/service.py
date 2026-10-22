@@ -84,6 +84,7 @@ class Service:
                 settings.deye, store=self.store, router=self.router, snapshot=lambda: inverter_source.latest,
                 on_messages=self.outbox.wake,
                 on_grid=lambda t: self.reserve.fire("grid", "back" if t.status is PowerStatus.ON else "lost"),
+                grid_day_path=os.path.join(settings.state_dir, f"grid-day-{settings.deye.source}.json"),
             )
         self._tasks: list[asyncio.Task] = []
 

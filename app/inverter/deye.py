@@ -23,6 +23,7 @@ import aiohttp
 
 from app.config import DeyeConfig
 from app.dtek.models import Snapshot
+from app.inverter.grid_day import GridDay
 from app.notify.router import Router
 from app.power.state import PowerState, PowerStatus, PowerTransition, next_state
 from app.storage.store import Store
@@ -217,10 +218,13 @@ class InverterMonitor:
         snapshot: Callable[[], Optional[Snapshot]] = lambda: None,
         on_messages: Optional[Callable[[], None]] = None,
         on_grid: Optional[Callable[[PowerTransition], None]] = None,
+        grid_day_path: Optional[str] = None,
     ):
         self.config = config
         self.source = config.source
         self._clock = clock
+        # Today's grid by tariff, from the daily counter at the tariff's hours; kept in grid_day_path.
+        self.grid_day = GridDay(config.night_start_h, config.night_end_h, grid_day_path)
         # Grid lost/back messages for the source's chats; off without a store (tests of polling alone).
         self._store = store
         self._router = router
@@ -304,6 +308,7 @@ class InverterMonitor:
             self.readings += 1
             self.last_lag_s = round((now - reading.at).total_seconds())
             self._misses = 0
+            self.grid_day.follow(self.latest, reading)
         else:
             self._misses += 1
         if self.latest is None or reading.at >= self.latest.at:
@@ -320,6 +325,7 @@ class InverterMonitor:
         return self.next_wait(self.last_success)
 
     async def restore(self) -> None:
+        self.grid_day.restore()
         if self._store is None:
             return
         async with self._store.transaction() as tx:
@@ -360,7 +366,12 @@ class InverterMonitor:
             self._on_grid(transition)
 
     def payload(self, now: datetime) -> Optional[dict]:
-        return self.latest.to_dict(now, self.STALE_S) if self.latest else None
+        if self.latest is None:
+            return None
+        body = self.latest.to_dict(now, self.STALE_S)
+        # None, None when a tariff boundary of the day was missed: the mini app shows the total alone.
+        body["grid_night_kwh"], body["grid_day_kwh"] = self.grid_day.split(self.latest) or (None, None)
+        return body
 
     def batteries_payload(self, now: datetime) -> list[dict]:
         """DEYE_BATTERIES in their configured order, for the batteries row of their source's mini app."""

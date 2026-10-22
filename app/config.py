@@ -70,6 +70,10 @@ class DeyeConfig:
     # Other inverters read in the same call, shown as batteries in another source's mini app.
     batteries: tuple[tuple[str, str], ...] = ()     # (name, device SN)
     batteries_source: Optional[str] = None
+    # The night tariff, by which the mini app splits what the grid gave today; read from deye-reserve's
+    # own DEYE_RESERVE_NIGHT_START/END, so the two agree.
+    night_start_h: int = 23
+    night_end_h: int = 7
 
 
 @dataclass(frozen=True)
@@ -218,6 +222,9 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         batteries_source = _get(env, "DEYE_BATTERIES_SOURCE", sources[0].name) if batteries else None
         if batteries_source is not None and batteries_source not in names:
             raise ConfigError(f"DEYE_BATTERIES_SOURCE={batteries_source!r} is not in SOURCES")
+        night_start, night_end = _int(env, "DEYE_RESERVE_NIGHT_START", 23), _int(env, "DEYE_RESERVE_NIGHT_END", 7)
+        if not 0 <= night_end < night_start <= 23:
+            raise ConfigError("DEYE_RESERVE_NIGHT_END must be before DEYE_RESERVE_NIGHT_START, both hours of the day")
         deye = DeyeConfig(
             app_id=_require(env, "DEYE_APP_ID"),
             app_secret=_require(env, "DEYE_APP_SECRET"),
@@ -232,6 +239,8 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
             notify_grid=_bool(env, "DEYE_NOTIFY_GRID", True),
             batteries=batteries,
             batteries_source=batteries_source,
+            night_start_h=night_start,
+            night_end_h=night_end,
         )
 
     return Settings(
