@@ -51,7 +51,7 @@ class Params:
     charge_kw: float = 4.3            # grid charge, grid side (Grid Charge 80 A; 50 A took 2.7 kW)
     grid_limit_kw: float = 4.5        # Grid Peak Shaving: the house plus the charger draw no more
     pv_charge_kw: float = 5.0         # PV surplus the battery takes at most (Max A Charge 100 A)
-    shutdown_soc: float = 20.0
+    shutdown_soc: float = 10.0        # Batt Shutdown: in an outage the lights go out here
     outage_min_soc: float = 25.0      # pessimistic floor during scheduled outages
     day_floor: int = 45               # kept by day: the reserve for unscheduled outages
     night_min: int = 45

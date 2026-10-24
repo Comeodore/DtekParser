@@ -702,12 +702,12 @@ async def test_a_short_loss_of_inputs_keeps_the_last_plan(make):
 # ---- the battery during an outage ----
 
 async def test_a_battery_that_will_not_last_is_reported_once(make):
-    # 15:10 in the 15:00-17:00 outage: 30% at ~900 W lasts about an hour, the grid is due at 17:00 (+30 min).
+    # 15:10 in the 15:00-17:00 outage: 20% at ~900 W lasts about an hour, the grid is due at 17:00 (+30 min).
     service, clock = make(now=T(17, 15, 10))
-    service.sources.reading = {"soc": 30.0, "grid_present": False, "load_w": 950.0, "pv_w": 50.0}
+    service.sources.reading = {"soc": 20.0, "grid_present": False, "load_w": 950.0, "pv_w": 50.0}
     await service.watch(clock["now"])
     text = service.messenger.texts[-1]
-    assert text.startswith("🪫 <b>Батареї може не вистачити до світла</b>\nЗаряд 30%, навантаження ~900 Вт")
+    assert text.startswith("🪫 <b>Батареї може не вистачити до світла</b>\nЗаряд 20%, навантаження ~900 Вт")
     assert "вистачить приблизно до 16:1" in text and "За графіком світло о 17:00." in text
     await service.watch(T(17, 15, 13))
     assert len(service.messenger.texts) == 1                          # once per outage
@@ -721,7 +721,7 @@ async def test_a_battery_that_will_not_last_is_reported_once(make):
 
 async def test_an_outage_outside_the_schedule_is_watched_too(make):
     service, clock = make(now=T(17, 19))
-    service.sources.reading = {"soc": 25.0, "grid_present": False, "load_w": 600.0, "pv_w": 0.0}
+    service.sources.reading = {"soc": 20.0, "grid_present": False, "load_w": 600.0, "pv_w": 0.0}
     await service.watch(clock["now"])
     assert service.messenger.texts[-1].endswith("Світла немає поза графіком.\nВарто зменшити навантаження.")
     service.sources.reading = {**service.sources.reading, "grid_present": True}
