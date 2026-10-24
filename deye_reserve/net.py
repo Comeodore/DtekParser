@@ -12,6 +12,7 @@ from deye_reserve.config import Config
 
 logger = logging.getLogger(__name__)
 
+# All of them are ranked against the panels (watched); the sun is built from config.sun_models only.
 MODELS = ("ecmwf_ifs025", "ukmo_seamless", "gem_seamless", "icon_seamless", "gfs_seamless",
           "meteofrance_seamless", "cma_grapes_global")
 
@@ -46,7 +47,8 @@ class HttpSources:
 
     async def weather(self) -> tuple[dict, Optional[dict]]:
         common = {**self._place(), "hourly": "global_tilted_irradiance", "forecast_days": 3}
-        multi = await self._get("https://api.open-meteo.com/v1/forecast", {**common, "models": ",".join(MODELS)})
+        multi = await self._get("https://api.open-meteo.com/v1/forecast",
+                                {**common, "models": ",".join(self._cfg.sun_models)})
         try:
             ensemble = await self._get("https://ensemble-api.open-meteo.com/v1/ensemble",
                                        {**common, "models": "ecmwf_ifs025"})
@@ -55,27 +57,6 @@ class HttpSources:
             logger.warning(f"Open-Meteo ensemble failed: {type(e).__name__}: {e}")
             ensemble = None
         return multi, ensemble
-
-
-class SolcastLimited(Exception):
-    pass
-
-
-class Solcast:
-    """The rooftop site's forecast; the key goes in a header, never in a URL that could reach a log."""
-
-    def __init__(self, api_key: str, site_id: str, session: aiohttp.ClientSession):
-        self._url = f"https://api.solcast.com.au/rooftop_sites/{site_id}/forecasts"
-        self._headers = {"Authorization": f"Bearer {api_key}"}
-        self._session = session
-
-    async def forecasts(self) -> dict:
-        async with self._session.get(self._url, params={"format": "json", "hours": 72}, headers=self._headers) as r:
-            if r.status == 429:
-                raise SolcastLimited("Solcast: 429")
-            if r.status >= 400:
-                raise RuntimeError(f"Solcast: HTTP {r.status}")
-            return await r.json(content_type=None)
 
 
 class Telegram:

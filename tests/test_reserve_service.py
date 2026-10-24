@@ -7,12 +7,11 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from deye_reserve.config import ConfigError, load_config
 from deye_reserve.deye import parse_tou, tou_request
-from deye_reserve.inputs import (Forecast, InputError, changed_days, combine_forecast, parse_schedule, parse_solcast,
-                                 rank_models)
+from deye_reserve.inputs import Forecast, InputError, changed_days, combine_forecast, parse_schedule, rank_models
 from deye_reserve.messages import change_reasons, night_line, render_charge
 from deye_reserve.net import HttpSources
 from deye_reserve.planner import Params, Slot, safe_table
-from deye_reserve.review import actual, decisions, solcast_lines
+from deye_reserve.review import actual, decisions, sun_lines, with_mix
 from deye_reserve.service import ReserveService
 from deye_reserve.web import make_app
 from deye_reserve.timeutil import KYIV_TZ
@@ -474,34 +473,47 @@ async def test_review_lines_up_decisions_with_the_day(make):
 
 
 TOP3 = ["icon_seamless", "meteofrance_seamless", "ecmwf_ifs025"]       # 186, 187 and 194 W off on 13-17.10
+SUN = ["meteofrance_seamless", "icon_seamless", "ukmo_seamless"]
 
 
-async def test_the_sun_is_the_median_of_the_models_that_fit_the_panels(make):
+async def test_the_sun_is_the_median_of_the_sun_models(make):
     service, clock = make()
     await ready(service, clock["now"])
-    # 13-17.10 against Deye's history: hours with the battery near full do not count (zero export cuts PV).
+    # All models are still ranked against 13-17.10 (watched): hours near a full battery do not count.
     assert [s["model"] for s in service.ranking[:3]] == TOP3 and service.ranking[-1]["model"] == "cma_grapes_global"
     assert all(s["hours"] >= 30 for s in service.ranking)
-    assert service.forecast.models[date(2026, 10, 18)] == TOP3
+    # ...but the sun is the plain median of the configured three, whatever the ranking says.
+    assert service.forecast.models[date(2026, 10, 18)] == SUN
     multi = fixture("openmeteo_models_20261017_1511.json")["hourly"]
     i = multi["time"].index("2026-10-18T13:00")
-    top = sorted(multi[f"shortwave_radiation_{m}"][i] for m in TOP3)
+    med = sorted(multi[f"shortwave_radiation_{m}"][i] for m in SUN)[1]
     ens = fixture("openmeteo_ensemble_20261017_1511.json")["hourly"]
     p10 = sorted(v[i] for k, v in ens.items() if k != "time")[5]
-    assert service.forecast.p50[(date(2026, 10, 18), 12)] == pytest.approx(
-        (top[1] + multi["shortwave_radiation_ecmwf_ifs025"][i]) / 2 * 5.35)
-    assert service.forecast.pess[(date(2026, 10, 18), 12)] == pytest.approx(min(p10, top[1]) * 5.35)
+    assert service.forecast.p50[(date(2026, 10, 18), 12)] == pytest.approx(med * 5.35)
+    assert service.forecast.pess[(date(2026, 10, 18), 12)] == pytest.approx(min(p10, med) * 5.35)
     await service.replan(clock["now"], "test")
-    assert service.journal.read()[0]["models"]["2026-10-18"] == TOP3
+    assert service.journal.read()[0]["models"]["2026-10-18"] == SUN
+    assert service.health()["sun_models"] == SUN
 
 
-def test_a_model_missing_a_day_gives_way_to_the_next():
+def test_a_sun_model_missing_a_day_is_left_out():
     multi, ens = fixture("openmeteo_models_20261017_1511.json"), fixture("openmeteo_ensemble_20261017_1511.json")
-    ranking = ["ukmo_seamless", "ecmwf_ifs025", "gem_seamless", "icon_seamless"]
-    fc = combine_forecast(multi, ens, 5.35, T(17, 15), ranking, 3)
-    assert fc.models[date(2026, 10, 18)] == ["ukmo_seamless", "ecmwf_ifs025", "gem_seamless"]
-    assert fc.models[date(2026, 10, 19)] == ["ecmwf_ifs025", "gem_seamless", "icon_seamless"]   # UKMO has gaps
-    assert len(combine_forecast(multi, ens, 5.35, T(17, 15)).models[date(2026, 10, 18)]) == 7     # no ranking: all
+    fc = combine_forecast(multi, ens, 5.35, T(17, 15), SUN)
+    assert fc.models[date(2026, 10, 18)] == SUN
+    assert fc.models[date(2026, 10, 19)] == ["meteofrance_seamless", "icon_seamless"]      # UKMO has gaps
+    h = multi["hourly"]
+    j = h["time"].index("2026-10-19T13:00")
+    two = [h[f"shortwave_radiation_{m}"][j] for m in SUN[:2]]
+    assert fc.p50[(date(2026, 10, 19), 12)] == pytest.approx(sum(two) / 2 * 5.35)
+    assert len(combine_forecast(multi, ens, 5.35, T(17, 15)).models[date(2026, 10, 18)]) == 7   # no models given: all
+
+
+async def test_a_cached_forecast_of_other_models_is_fetched_again(make):
+    service, clock = make()
+    await ready(service, clock["now"])
+    assert service._forecast_fresh(clock["now"])
+    service.forecast.models[date(2026, 10, 18)] = TOP3       # built by the ranking, before 24.10
+    assert not service._forecast_fresh(clock["now"])
 
 
 def test_ranking_skips_hours_with_a_full_battery():
@@ -513,79 +525,18 @@ def test_ranking_skips_hours_with_a_full_battery():
     assert full and max(s.hours for s in sunny) <= 24 - len(full)
 
 
-def test_ecmwf_keeps_its_half_of_p50_outside_the_top():
-    # 03-17.10 on the server: Météo-France, ICON and UKMO fit best, ECMWF came fourth.
-    multi, ens = fixture("openmeteo_models_20261017_1511.json"), fixture("openmeteo_ensemble_20261017_1511.json")
-    top = ["meteofrance_seamless", "icon_seamless", "ukmo_seamless"]
-    fc = combine_forecast(multi, ens, 5.35, T(17, 15), top + ["ecmwf_ifs025"], 3)
-    h = multi["hourly"]
-    i = h["time"].index("2026-10-18T13:00")
-    med = sorted(h[f"shortwave_radiation_{m}"][i] for m in top)[1]
-    assert fc.models[date(2026, 10, 18)] == top
-    assert fc.p50[(date(2026, 10, 18), 12)] == pytest.approx((med + h["shortwave_radiation_ecmwf_ifs025"][i]) / 2 * 5.35)
-    assert fc.total_kwh(date(2026, 10, 18)) > fc.total_kwh(date(2026, 10, 18), pessimistic=True) + 1
-
-
-SOLCAST = {"forecasts": [
-    {"pv_estimate": 1.2, "pv_estimate10": 0.6, "pv_estimate90": 1.6, "period_end": "2026-10-18T07:30:00.0000000Z", "period": "PT30M"},
-    {"pv_estimate": 1.4, "pv_estimate10": 0.8, "pv_estimate90": 1.8, "period_end": "2026-10-18T08:00:00.0000000Z", "period": "PT30M"},
-    {"pv_estimate": 2.0, "pv_estimate10": 1.0, "pv_estimate90": 2.4, "period_end": "2026-10-19T08:30:00.0000000Z", "period": "PT30M"},
-]}
-
-
-def test_solcast_half_hours_become_kyiv_hours():
-    hours = parse_solcast(SOLCAST)
-    # 07:00-08:00 UTC is 10:00-11:00 in Kyiv (UTC+3 until 25.10)
-    assert hours[(date(2026, 10, 18), 10)] == pytest.approx((1300, 700, 1700))
-    assert hours[(date(2026, 10, 19), 11)] == pytest.approx((2000, 1000, 2400))
-
-
-class FakeSolcast:
-    def __init__(self, *answers):
-        self.answers, self.calls = list(answers), 0
-
-    async def forecasts(self):
-        self.calls += 1
-        answer = self.answers.pop(0) if self.answers else SOLCAST
-        if isinstance(answer, Exception):
-            raise answer
-        return answer
-
-
-async def test_solcast_is_watched_within_its_budget(tmp_path):
-    clock = {"now": T(18, 5, 34)}
-    config = load_config({**ENV, "DEYE_RESERVE_DATA_DIR": str(tmp_path), "SOLCAST_API_KEY": "k", "SOLCAST_SITE_ID": "s",
-                          "DEYE_RESERVE_SOLCAST_MAX_CALLS": "3"})
-    solcast = FakeSolcast(RuntimeError("busy"))
-    service = ReserveService(config, Sources(lambda: clock["now"]), Deye(), Messenger(), clock=lambda: clock["now"],
-                             solcast=solcast)
-    assert service._next_solcast == T(18, 8, 34)
-    await service.refresh_solcast(T(18, 8, 34))                      # a failure: once more in 15 min
-    assert service._next_solcast == T(18, 8, 49) and service.solcast_log.read() == []
-    await service.refresh_solcast(T(18, 8, 49))
-    row = service.solcast_log.read()[0]
-    assert row["days"]["2026-10-18"] == [1.3, 0.7, 1.7] and row["hours"]["2026-10-18T10"] == [1300, 700, 1700]
-    assert service._next_solcast == T(18, 10, 34)
-    await service.refresh_solcast(T(18, 10, 34))
-    await service.refresh_solcast(T(18, 12, 34))                     # the fourth call today: over the budget
-    assert solcast.calls == 3 and service.state.solcast_calls == {"2026-10-18": 3}
-    # Not planned with: the sun still comes from Open-Meteo.
-    assert service.health()["solcast"]["on"]
-
-
-def test_no_key_no_solcast(make):
-    service, _ = make()
-    assert service.solcast is None and service._next_solcast is None and service.cfg.solcast_key is None
-
-
-def test_review_puts_solcast_next_to_the_panels():
+def test_review_puts_the_plans_sun_and_the_models_next_to_the_panels():
     history = fixture("deye_history_power_20261009_17.json")["stationDataItems"]
-    rows = [{"at": "2026-10-15T22:04:00+03:00", "kind": "solcast", "days": {"2026-10-16": [2.4, 1.1, 3.9]},
-             "hours": {f"2026-10-16T{h:02d}": [300, 150, 500] for h in range(8, 17)}}]
-    lines = solcast_lines(rows, history, date(2026, 10, 16))
+    previous = with_mix(fixture("openmeteo_previous_day1_models_20261013_17.json"), SUN)
+    models = rank_models(previous, history, 5.35, date(2026, 10, 16), date(2026, 10, 16), min_hours=1)
+    assert "mix" in {s.model for s in models}
+    rows = [{"at": "2026-10-15T22:00:00+03:00", "kind": "replan", "forecast": {"2026-10-16": [2.4, 1.1]}},
+            {"at": "2026-10-16T05:30:00+03:00", "kind": "replan", "forecast": {"2026-10-16": [2.1, 1.0]}}]
+    lines = sun_lines(rows, history, date(2026, 10, 16), models)
     assert lines[0].startswith("panels 16.10: 1.7") and "hours usable" in lines[0]
-    assert lines[1].startswith("solcast day-ahead (15.10 22:04): P50 2.4 / P10 1.1 / P90 3.9 kWh; hourly error ")
-    assert lines[2] == "solcast morning (15.10 22:04): P50 2.4 / P10 1.1 / P90 3.9 kWh; hourly error " + lines[1].split("hourly error ")[1]
+    assert lines[1] == "plan's sun day-ahead (15.10 22:00): P50 2.4 / pessimistic 1.1 kWh"
+    assert lines[2] == "plan's sun morning (16.10 05:30): P50 2.1 / pessimistic 1.0 kWh"
+    assert lines[3].startswith("models' day-ahead, usable hours: ") and "mix " in lines[3]
 
 
 # ---- the sun on the panels' plane ----
@@ -593,12 +544,12 @@ def test_review_puts_solcast_next_to_the_panels():
 def test_the_sun_is_irradiance_on_the_panels_plane():
     multi, ens = fixture("openmeteo_gti_models_20261019.json"), fixture("openmeteo_gti_ensemble_20261019.json")
     top = ["ukmo_seamless", "ecmwf_ifs025", "meteofrance_seamless"]
-    fc = combine_forecast(multi, ens, 4.4, T(19, 0), top, 3)
+    fc = combine_forecast(multi, ens, 4.4, T(19, 0), top)
     h = multi["hourly"]
     i = h["time"].index("2026-10-19T13:00")
     med = sorted(h[f"global_tilted_irradiance_{m}"][i] for m in top)[1]
     assert fc.ensemble and fc.models[date(2026, 10, 19)] == top
-    assert fc.p50[(date(2026, 10, 19), 12)] == pytest.approx((med + h["global_tilted_irradiance_ecmwf_ifs025"][i]) / 2 * 4.4)
+    assert fc.p50[(date(2026, 10, 19), 12)] == pytest.approx(med * 4.4)
     members = sorted(v[i] for k, v in ens["hourly"].items() if k != "time")
     assert fc.pess[(date(2026, 10, 19), 12)] == pytest.approx(min(members[5], med) * 4.4)
     # The models are ranked on the same plane, by name.
@@ -633,6 +584,9 @@ async def test_open_meteo_is_asked_for_the_roof():
     await sources.previous_runs(date(2026, 10, 13), date(2026, 10, 17))
     assert [p["hourly"] for _, p in asked] == ["global_tilted_irradiance", "global_tilted_irradiance",
                                                "global_tilted_irradiance_previous_day1"]
+    # The sun from the three sun models only; all seven are ranked.
+    assert asked[0][1]["models"] == "meteofrance_seamless,icon_seamless,ukmo_seamless"
+    assert len(asked[2][1]["models"].split(",")) == 7
     assert all((p["tilt"], p["azimuth"]) == (30.0, 0.0) for _, p in asked)
 
 

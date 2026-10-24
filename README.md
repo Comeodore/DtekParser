@@ -38,12 +38,12 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   out the Deye inverter's Time of Use tables (six slots: start, target SOC,
   grid charge) for Круглик from the DTEK schedule (queue `DEYE_RESERVE_GROUP`,
   read from dtek-service on 127.0.0.1:9998), the sun (Open-Meteo irradiance
-  on the panels' plane, 30° south: P50 = mean of ECMWF and the median of
-  the three models whose day-ahead forecasts matched the panels best over
-  the last two weeks, pessimistic = min of the ECMWF-ensemble P10 and that
-  median; PV W = 4.4 × GTI) and the house's load (a week). Both come from
-  one Deye history call a day; the model ranking leaves out hours with the
-  battery near full, when zero export holds the panels down. Today and
+  on the panels' plane, 30° south: P50 = the median of Météo-France, ICON
+  and UKMO, which matched the panels best, pessimistic = min of the
+  ECMWF-ensemble P10 and that median; PV W = 4.4 × GTI) and the house's
+  load (a week, from one Deye history call a day). All models are still
+  ranked against the panels daily, only to watch, leaving out hours with
+  the battery near full, when zero export holds the panels down. Today and
   tomorrow are planned together, with a table per day (tomorrow's charges
   in tomorrow's table), simulated with the battery's measured charge and
   discharge losses. The night target is the cheapest one from 45 to 95%
@@ -77,11 +77,7 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   most 6 tables a day, one command at a time. Every replan, write and
   message goes to `reserve-data/journal.jsonl` with what it was based on;
   `docker exec deye-reserve python -m deye_reserve.review` lines a day's
-  decisions up with what Deye recorded. With `SOLCAST_API_KEY` and
-  `SOLCAST_SITE_ID` it also fetches the Solcast rooftop forecast six
-  times a day (at most 8 calls; the free tier allows 10) into
-  `reserve-data/solcast.jsonl`. It is only watched: the review compares it
-  with the panels next to the models, the plan still uses Open-Meteo.
+  decisions up with what Deye recorded.
   `GET 127.0.0.1:9997/plan` shows the current plan, `/health` the loop.
 - **Mini app and API.** Each source's port serves its Telegram mini app and
   `/api/v1/*`: kem on 9999, krem on 9998.

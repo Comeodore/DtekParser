@@ -9,6 +9,7 @@ charge it set up. Two Deye calls: the station history and the TOU table.
 from __future__ import annotations
 
 import asyncio
+import statistics
 import sys
 from datetime import datetime, time, timedelta
 from typing import Optional
@@ -17,7 +18,7 @@ import aiohttp
 
 from deye_reserve.config import load_config
 from deye_reserve.deye import DeyeClient
-from deye_reserve.inputs import FULL_SOC, rank_models
+from deye_reserve.inputs import FULL_SOC, model_name, rank_models
 from deye_reserve.journal import Journal
 from deye_reserve.net import HttpSources
 from deye_reserve.messages import table_line
@@ -150,30 +151,36 @@ def panels_by_hour(items: list[dict], day) -> dict[int, float]:
             if len(v) >= 10 and all(s is not None and s < FULL_SOC for _, s in v)}
 
 
-def solcast_lines(rows: list[dict], items: list[dict], day, models: Optional[list] = None) -> list[str]:
-    """Solcast's day-ahead (last fetch before midnight) and morning (before 07:00) forecasts against the panels."""
+def sun_lines(rows: list[dict], items: list[dict], day, models: Optional[list] = None) -> list[str]:
+    """The panels against the plan's own day-ahead (last replan before midnight) and morning (before 07:00)
+    sun for `day`, and each model's day-ahead, the sun models' median ("mix") among them."""
     actual = panels_by_hour(items, day)
     total = sum(float(i.get("generationPower") or 0) for i in items
                 if datetime.fromtimestamp(float(i["timeStamp"]), KYIV_TZ).date() == day) * 5 / 60 / 1000
     out = [f"panels {day:%d.%m}: {total:.2f} kWh; {len(actual)} hours usable (battery under {FULL_SOC:.0f}%)"]
     midnight = datetime.combine(day, time(0), KYIV_TZ)
     for name, before in (("day-ahead", midnight), ("morning", midnight + timedelta(hours=7))):
-        fetched = [r for r in rows if _t(r["at"]) < before and day.isoformat() in (r.get("days") or {})]
-        if not fetched:
-            out.append(f"solcast {name}: no forecast")
-            continue
-        r = fetched[-1]
-        p50, p10, p90 = r["days"][day.isoformat()]
-        errs = []
-        for h, got in actual.items():
-            v = r["hours"].get(f"{day.isoformat()}T{h:02d}")
-            if v is not None and not (v[0] < 20 and got < 20):
-                errs.append(v[0] - got)
-        mae = f"{sum(abs(e) for e in errs) / len(errs):.0f} W (bias {sum(errs) / len(errs):+.0f}) over {len(errs)} h" if errs else "-"
-        out.append(f"solcast {name} ({_hm(_t(r['at']))}): P50 {p50} / P10 {p10} / P90 {p90} kWh; hourly error {mae}")
+        planned = [r for r in rows if r.get("kind") == "replan" and _t(r["at"]) < before
+                   and day.isoformat() in (r.get("forecast") or {})]
+        if planned:
+            p50, pess = planned[-1]["forecast"][day.isoformat()]
+            out.append(f"plan's sun {name} ({_hm(_t(planned[-1]['at']))}): P50 {p50} / pessimistic {pess} kWh")
     if models:
-        out.append("models' day-ahead, same hours: " + ", ".join(f"{s.model} {s.mae_w:.0f} W" for s in models))
+        out.append("models' day-ahead, usable hours: " + ", ".join(
+            f"{s.model} {s.mae_w:.0f} W (bias {s.bias_w:+.0f})" for s in models))
     return out
+
+
+def with_mix(previous: dict, names) -> dict:
+    """Open-Meteo's previous-runs answer plus one more "model", mix: the median of `names` hour by hour."""
+    hourly = dict(previous.get("hourly") or {})
+    keys = [k for k in hourly if k != "time" and model_name(k) in names]
+    mix = []
+    for i in range(len(hourly.get("time") or [])):
+        vals = [hourly[k][i] for k in keys if hourly[k][i] is not None]
+        mix.append(statistics.median(vals) if vals else None)
+    hourly["global_tilted_irradiance_previous_day1_mix"] = mix
+    return {**previous, "hourly": hourly}
 
 
 async def review(end: datetime) -> str:
@@ -200,16 +207,16 @@ async def review(end: datetime) -> str:
             out += actual(items, start, end, sorted(outages.values()), cfg.params)
         except Exception as e:
             out.append(f"history failed: {type(e).__name__}: {e}")
-        solcast = Journal(cfg.data_dir / "solcast.jsonl").read(since=start - timedelta(days=2), until=end)
-        if solcast and items:
+        if items:
             day = start.date()
             try:
-                previous = await HttpSources(cfg, session).previous_runs(day, day)
+                previous = with_mix(await HttpSources(cfg, session).previous_runs(day, day), cfg.sun_models)
                 models = rank_models(previous, items, cfg.pv_per_gti, day, day, min_hours=1)
             except Exception as e:
                 out.append(f"previous runs failed: {type(e).__name__}: {e}")
                 models = None
-            out += ["", "== sun: Solcast against the panels"] + solcast_lines(solcast, items, day, models)
+            out += ["", f"== sun against the panels (mix = median of {', '.join(cfg.sun_models)})"]
+            out += sun_lines(rows, items, day, models)
         try:
             sn = cfg.device_sn or state.device_sn
             table, _ = await deye.read_tou(sn)

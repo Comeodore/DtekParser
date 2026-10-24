@@ -40,8 +40,8 @@ class Config:
     pv_per_gti: float           # PV W per W/m2 of irradiance on the panels' plane
     tilt: float                 # the panels' plane: degrees from horizontal...
     azimuth: float              # ...and from south (east negative), as Open-Meteo takes them
-    top_models: int             # the sun's median is of this many models that fit the panels best
-    rank_days: int              # ...judged over this many days
+    sun_models: tuple[str, ...] # the sun is the median of these Open-Meteo models
+    rank_days: int              # all models' fit to the panels is watched over this many days
     host: str
     port: int
     data_dir: Path
@@ -55,11 +55,6 @@ class Config:
     poll_s: float               # fallback look at the schedule
     replan_s: float
     forecast_at: tuple[time, ...]
-    # Solcast (watched only: logged and compared with the panels, not planned with)
-    solcast_key: Optional[str]
-    solcast_site: Optional[str]
-    solcast_at: tuple[time, ...]
-    solcast_max_calls: int      # per UTC day; the free tier allows 10
     # Writing
     write: bool
     max_writes_per_day: int
@@ -162,7 +157,10 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
         pv_per_gti=_num(env, "DEYE_RESERVE_PV_PER_GTI", 4.4),
         tilt=_num(env, "DEYE_RESERVE_TILT", 30.0),
         azimuth=_num(env, "DEYE_RESERVE_AZIMUTH", 0.0),
-        top_models=_num(env, "DEYE_RESERVE_TOP_MODELS", 3, int),
+        # Of the seven Open-Meteo models these three fit the panels best on 08-24.10, their median better still.
+        sun_models=tuple(m.strip() for m in _get(env, "DEYE_RESERVE_SUN_MODELS",
+                                                 "meteofrance_seamless,icon_seamless,ukmo_seamless").split(",")
+                         if m.strip()),
         rank_days=_num(env, "DEYE_RESERVE_RANK_DAYS", 14, int),
         host=_get(env, "DEYE_RESERVE_HOST", "127.0.0.1"),
         port=_num(env, "DEYE_RESERVE_PORT", 9997, int),
@@ -175,11 +173,6 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
         poll_s=_num(env, "DEYE_RESERVE_POLL_S", 600.0),
         replan_s=_num(env, "DEYE_RESERVE_REPLAN_S", 3600.0),
         forecast_at=_times(_get(env, "DEYE_RESERVE_FORECAST_AT", "05:30,22:00")),
-        solcast_key=_get(env, "SOLCAST_API_KEY"),
-        solcast_site=_get(env, "SOLCAST_SITE_ID"),
-        # Off the round minutes: Solcast answers 429 at busy times.
-        solcast_at=_times(_get(env, "DEYE_RESERVE_SOLCAST_AT", "05:34,08:34,10:34,12:34,14:34,22:04")),
-        solcast_max_calls=_num(env, "DEYE_RESERVE_SOLCAST_MAX_CALLS", 8, int),
         write=_bool(env, "DEYE_RESERVE_WRITE", False),
         max_writes_per_day=_num(env, "DEYE_RESERVE_MAX_WRITES", 6, int),
         watch_s=_num(env, "DEYE_RESERVE_WATCH_S", 180.0),

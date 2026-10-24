@@ -61,14 +61,20 @@ the whole import, house and charger, under 4.5 kW.
   (ECMWF, UKMO, GEM, ICON, GFS, Météo-France, CMA) plus the 51-run ECMWF
   ensemble. PV W = 4.4 × GTI (what 5.35 × horizontal was in September–
   October; the plane follows the low winter sun: on clear December days the
-  roof gets ~1.8× the horizontal). P50 = mean(ECMWF, median of the top-3
-  models), pessimistic = min(ECMWF ensemble P10, median of the top-3). The
-  top 3 are ranked once a day by how well their day-ahead forecasts
-  (previous runs, on the same plane) matched the panels over 14 days, on
-  hours with the battery under 95%.
-- **Solcast** rooftop site `d6c1-af45-2be5-4e98` (south, 30°, DC 6.6,
-  AC 6): **watched only**, six calls a day, compared with the panels in the
-  morning review.
+  roof gets ~1.8× the horizontal). Since 24.10 **P50 = median of
+  Météo-France, ICON and UKMO** (`DEYE_RESERVE_SUN_MODELS`; a model with
+  gaps on a day is left out), pessimistic = min(ECMWF ensemble P10, that
+  median). Day-ahead against the panels on 08–24.10, hours with room in
+  the battery: this median was off by 170 W an hour and 0.90 kWh a day and
+  about right on the whole (×0.97); mean(ECMWF, median of the top-3 by a
+  14-day ranking), used until then, by 212 W and 1.48 kWh, 24% high
+  (ECMWF alone 236 W, +36%; the ranking's best model 266 W: a fortnight's
+  fit chases noise). All seven models are still ranked once a day against
+  the panels (hours with the battery under 95%), only to watch: `/health`
+  and the review show it.
+- **Solcast** was watched 18–24.10 and dropped: its day-ahead was off by
+  164–302 W an hour, never better than the day's best Open-Meteo model,
+  always high, with a useless P10–P90 band (0.7–24 kWh).
 - **Load**: Deye `station/history/power`, one call a day (14 days): hourly
   mean and P80 over the last 7 days.
 
@@ -185,10 +191,9 @@ the whole import, house and charger, under 4.5 kW.
 - When the 10-min fallback poll of the schedule sees a new DTEK stamp.
 - Every hour, after each forecast refresh (05:30, 22:00), and at the time
   tomorrow's table takes over.
-- Load history and the model ranking refresh at 00:20; Solcast at 05:34,
-  08:34, 10:34, 12:34, 14:34 and 22:04.
+- Load history and the model ranking refresh at 00:20.
 - The forecast is also fetched at start when the cached one is over 12 h
-  old. A new forecast keeps the hours already over as the old one had
+  old or from other models than the sun models. A new forecast keeps the hours already over as the old one had
   them (since 19.10): 22:00 is for tomorrow's night charge, and today's
   sun in the krem mini app no longer moves after sunset (on 19.10 a
   restart at 20:38 took it from 5.27 to 3.51 kWh).
@@ -199,12 +204,14 @@ the whole import, house and charger, under 4.5 kW.
   prices, expected and pessimistic results, the table now and every day's
   table, when tomorrow's takes over, write outcome), write, message and
   battery alert.
-- `reserve-data/solcast.jsonl`: every Solcast forecast, hourly.
+- `reserve-data/solcast.jsonl`: Solcast's forecasts of 18–24.10, kept as
+  they were; nothing writes there any more.
 - `GET 127.0.0.1:9997/plan` and `/health`.
 - `docker exec deye-reserve python -m deye_reserve.review [END]` lines a
   day's decisions up with Deye's history (SOC, grid bought by tariff, SOC
-  in each outage), Solcast and the models against the panels, and the
-  inverter's table.
+  in each outage), the plan's own day-ahead and morning sun and every
+  model's day-ahead against the panels ("mix" is the sun models' median),
+  and the inverter's table.
 
 ## What the data showed (review of 18–19.10)
 
@@ -259,9 +266,7 @@ the satellite. Scripts were kept out of the repo.
    a 30% outage floor: options for the winter.
 2. Tomorrow not yet published by 23:00 (DTEK sometimes publishes after
    midnight or at 06:30 for 07:00): the night target assumes no outages.
-3. Solcast: decide on 25.10 from the morning reviews; its value for cost
-   is small (see above).
-4. The green tariff, when it comes: export instead of curtailment changes
+3. The green tariff, when it comes: export instead of curtailment changes
    the economics of the night target.
 
 ## Operations
@@ -272,7 +277,7 @@ the satellite. Scripts were kept out of the repo.
   `rollback/code-<date>`. Use short or detached SSH commands: sessions
   drop when the laptop sleeps.
 - **Secrets** are in `/opt/dtek-service/.env`: DEYE_* (shared with
-  dtek-service), BOT_SCHEDULEBOT_TOKEN, SOLCAST_API_KEY. Never print
+  dtek-service), BOT_SCHEDULEBOT_TOKEN. Never print
   them. Settings are DEYE_RESERVE_* (see `.env.example`).
 - **Loki** is at 127.0.0.1:3100 (containers `dtek-service`,
   `deye-reserve`); the krem collector logs every schedule version.
@@ -280,5 +285,4 @@ the satellite. Scripts were kept out of the repo.
   temporary venv, then run `pytest`. Fixtures are real Deye history
   09–17.10 and Open-Meteo forecasts (horizontal of 17.10, tilted of 19.10).
 - **Deye quota**: 100k calls a month for the app ID; dtek-service uses
-  ~47–50k, deye-reserve ~1k. **Solcast**: 10 calls a day, the service
-  uses ≤8.
+  ~47–50k, deye-reserve ~1k.

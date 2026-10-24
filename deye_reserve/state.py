@@ -45,7 +45,6 @@ class State:
     written_table: Optional[list] = None        # taken by the inverter (order status 666); not read back
     writes: dict = field(default_factory=dict)  # ISO date -> write attempts
     last_write: Optional[dict] = None
-    solcast_calls: dict = field(default_factory=dict)   # UTC date -> Solcast calls made
     charge_samples: list = field(default_factory=list)  # grid charging seen: [at, battery W, grid W, house W, SOC]
     charge_report_due: bool = True              # the first grid charge since 80 A / peak shaving 4.5 kW is told once
 

@@ -161,7 +161,7 @@ def _median(values: list[float]) -> float:
 
 
 def combine_forecast(multi: dict, ensemble: Optional[dict], pv_factor: float, fetched_at: datetime,
-                     ranking: Optional[Sequence[str]] = None, top: int = 3) -> Forecast:
+                     models: Optional[Sequence[str]] = None) -> Forecast:
     """P50 and pessimistic PV per hour from Open-Meteo's multi-model and ECMWF-ensemble answers.
 
     The radiation is whatever the answers carry, PV W = pv_factor x W/m2: the
@@ -169,23 +169,22 @@ def combine_forecast(multi: dict, ensemble: Optional[dict], pv_factor: float, fe
     which follows the low winter sun that horizontal radiation misses (on clear
     December days the roof gets ~1.8x the horizontal, in October ~1.3x).
 
-    Backtest 23.08-16.10 (day-ahead vs satellite): ECMWF IFS had the lowest
-    error, the median of models never mixed up dark, mixed and sunny days,
-    and the default best_match (ICON) under-forecast. So:
-      P50  = mean(ECMWF, median of models)
-      pess = min(ECMWF ensemble P10, median of models)
-    With a `ranking` (rank_models: best fit to this roof first) the median is
-    of the `top` best models only. A model with gaps on a day (UKMO beyond
-    ~2 days) is left out for that day, and the next one in the ranking stands in.
+      P50  = median of `models` (all the answer carries without them)
+      pess = min(ECMWF ensemble P10, that median)
+    Against the panels on 08-24.10 (day-ahead, hours the battery had room) the
+    median of Météo-France, ICON and UKMO was off by 170 W an hour and 0.90 kWh
+    a day, about right on the whole (x0.97); mean(ECMWF, median of the three
+    best-ranked models), used until 24.10, by 212 W and 1.48 kWh, 24% high:
+    ECMWF runs high here, and the ranking chased each fortnight's noise.
+    A model with gaps on a day (UKMO beyond ~2 days) is left out for that day.
     Radiation is the mean of the preceding hour: the value stamped h+1 is PV hour h.
     Without the ensemble the pessimistic case is half the median.
     """
     hourly = multi.get("hourly") or {}
     times = hourly.get("time") or []
-    models = [k for k in hourly if k != "time"]
-    if not times or not models:
+    keys = [k for k in hourly if k != "time"]
+    if not times or not keys:
         raise InputError("Open-Meteo не повернув прогноз")
-    ecmwf = next((k for k in models if k.endswith("ecmwf_ifs025")), None)
 
     def gen_hour(stamp: str) -> tuple[date, int]:
         t = datetime.fromisoformat(stamp) - timedelta(hours=1)
@@ -206,25 +205,23 @@ def combine_forecast(multi: dict, ensemble: Optional[dict], pv_factor: float, fe
     for day, idx in by_day.items():
         if not DAYLIGHT <= {gen_hour(times[i])[1] for i in idx}:
             continue        # a day cut by the range is not used
-        usable = [m for m in models if all(hourly[m][i] is not None for i in idx)]
+        usable = [m for m in keys if all(hourly[m][i] is not None for i in idx)]
+        if models:
+            by_name = {model_name(m): m for m in usable}
+            usable = [by_name[m] for m in models if m in by_name]
         if not usable:
             continue
-        with_ecmwf = ecmwf in usable        # ECMWF's own half of P50 does not depend on its rank
-        if ranking:
-            by_name = {model_name(m): m for m in usable}
-            usable = [by_name[r] for r in ranking if r in by_name][:top] or usable
         used[day] = [model_name(m) for m in usable]
         for i in idx:
             key = gen_hour(times[i])
             med = _median([hourly[m][i] for m in usable])
-            mid = (med + hourly[ecmwf][i]) / 2 if with_ecmwf else med
             low = med * 0.5
             j = ens_index.get(times[i])
             if j is not None:
                 vals = sorted(v[j] for v in members.values() if v[j] is not None)
                 if vals:
                     low = min(vals[min(int(len(vals) * 0.1), len(vals) - 1)], med)
-            p50[key] = mid * pv_factor
+            p50[key] = med * pv_factor
             pess[key] = low * pv_factor
     if not p50:
         raise InputError("у прогнозі Open-Meteo немає повних днів")
@@ -293,23 +290,6 @@ def rank_models(previous: dict, items: list[dict], pv_factor: float, first: date
         if len(errors) >= min_hours:
             scores.append(ModelScore(model_name(key), sum(errors) / len(errors), sum(biases) / len(biases), len(errors)))
     return sorted(scores, key=lambda s: s.mae_w)
-
-
-# ---- Solcast (rooftop site forecasts) ----
-
-def parse_solcast(data: dict) -> dict[tuple[date, int], tuple[float, float, float]]:
-    """Half-hourly kW (P50, P10, P90) by period end in UTC -> hourly W by (Kyiv date, hour)."""
-    halves: dict[tuple[date, int], list[tuple[float, float, float]]] = defaultdict(list)
-    for item in data.get("forecasts") or []:
-        end = item.get("period_end")
-        if not end:
-            continue
-        # "2026-10-18T10:30:00.0000000Z": seven fractional digits are more than fromisoformat takes.
-        stamp = datetime.fromisoformat(end.split(".")[0].rstrip("Z") + "+00:00")
-        start = (stamp - timedelta(minutes=30)).astimezone(KYIV_TZ)
-        halves[start.date(), start.hour].append(tuple(float(item.get(k) or 0) * 1000 for k in
-                                                      ("pv_estimate", "pv_estimate10", "pv_estimate90")))
-    return {key: tuple(sum(v[i] for v in vals) / len(vals) for i in range(3)) for key, vals in halves.items()}
 
 
 # ---- Load (Deye station/history/power) ----
