@@ -34,9 +34,10 @@ def tables_from_dict(data: Optional[dict]) -> Optional[dict[date, Table]]:
 class State:
     previous_tables: dict = field(default_factory=dict)  # the last plan's tables by ISO date (they stay unless clearly beaten)
     plan_at: Optional[str] = None               # when that plan was made (it is held through a short loss of inputs)
-    sent_tables: dict = field(default_factory=dict)     # the table each day's last message showed, by ISO date
+    sent_tables: dict = field(default_factory=dict)     # the table each day's last news showed, by ISO date
     sent_schedule: dict = field(default_factory=dict)   # our group's slots by ISO date, as last sent
-    told: dict = field(default_factory=dict)    # what the plan rested on at the last table message (its reasons)
+    told: dict = field(default_factory=dict)    # what the plan rested on at the last table news (its reasons)
+    why: dict = field(default_factory=dict)     # ISO date -> {"at", "reasons"} of that day's last table news
     plan_ctx: dict = field(default_factory=dict)  # ...and at the last replan, the one a change is told against
     alerts: list = field(default_factory=list)  # outages the owner was warned about (battery will not last)
     seen_stamp: Optional[str] = None            # DTEK's schedule "last updated" seen by the fallback poll

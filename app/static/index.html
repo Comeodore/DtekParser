@@ -440,6 +440,39 @@
         .battery-flow { font-size: 12px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
         .battery-flow:empty { display: none; }
 
+        /* krem, the owner only: deye-reserve's TOU table, a range a row: the hours, the target SOC as a bar and
+           a number, and the bolt where it charges from the grid. */
+        .tou-status { font-size: 13px; font-weight: 500; color: var(--text-secondary); white-space: nowrap; }
+        .tou-status.written { color: var(--text-on); }
+        .tou-status.pending { color: var(--text-warn); }
+        .tou-status.failed { color: var(--text-off); }
+        .tou-rows {
+            display: grid;
+            grid-template-columns: minmax(3.4em, max-content) 1fr 2.6em 14px;
+            align-items: center;
+            column-gap: var(--spacing-md);
+            row-gap: 10px;
+        }
+        .tou-time { font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums; }
+        .tou-bar { height: 6px; border-radius: 3px; background: var(--hub-node-bg); overflow: hidden; }
+        .tou-bar > div { height: 100%; border-radius: 3px; background: var(--text-secondary); opacity: 0.6; }
+        .tou-bar.charge > div { background: var(--text-on); opacity: 1; }
+        .tou-soc { font-size: 15px; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+        .tou-bolt { display: flex; color: var(--text-on); }
+        .tou-bolt svg { width: 14px; height: 14px; }
+        .tou-time.now, .tou-soc.now { color: var(--accent); }
+        .tou-time.now { font-weight: 700; }
+        .tou-note { font-size: 13px; line-height: 1.4; color: var(--text-warn); margin-bottom: var(--spacing-md); }
+        .tou-why {
+            margin-top: var(--spacing-md);
+            padding-top: var(--spacing-md);
+            border-top: 1px solid var(--divider);
+            font-size: 12px;
+            line-height: 1.45;
+            color: var(--text-secondary);
+        }
+        .tou-why-at { font-weight: 600; font-variant-numeric: tabular-nums; margin-right: 4px; }
+
         .inverter-time { color: var(--text-primary); font-weight: 500; }
         .inverter.stale .hub { opacity: 0.5; }
         .inverter.stale .inverter-time { color: var(--text-warn); }
@@ -544,6 +577,14 @@
         </div>
 
         <div id="days"></div>
+
+        <div class="card hidden" id="touCard">
+            <div class="schedule-header">
+                <span class="schedule-title" data-i18n="touTitle"></span>
+                <span class="tou-status" id="touStatus"></span>
+            </div>
+            <div id="touBody"></div>
+        </div>
     </div>
 
     <div class="toast" id="toast"></div>
@@ -554,6 +595,9 @@
 
         const API_ENDPOINT = '/api/v1/schedule';
         const REFRESH_INTERVAL = 10000;
+        // The owner's TOU table: the server checks Telegram's signed initData; it changes at most every few minutes.
+        const TOU_ENDPOINT = '/api/v1/reserve/table';
+        const TOU_REFRESH = 30000;
 
         const $ = id => document.getElementById(id);
 
@@ -601,7 +645,21 @@
                 kilowatt: 'kW',
                 home: 'Home',
                 elevator: 'Elevator',
-                water: 'Water'
+                water: 'Water',
+                touTitle: '🔋 TOU table',
+                touWritten: '✓ in the inverter',
+                touOff: 'recommendation only',
+                touPending: 'not in the inverter yet',
+                touFailed: 'not written',
+                touToday: 'Today',
+                touTomorrow: 'Tomorrow',
+                touBoth: 'Today and tomorrow',
+                touFrom: 'from',
+                touCharge: 'charge from the grid',
+                touSafe: 'Safe table 90/45',
+                touKept: 'Plan of',
+                touStale: 'The plan has not been updated since',
+                touNone: 'No plan for today'
             },
             uk: {
                 loading: 'Завантаження...',
@@ -646,7 +704,21 @@
                 kilowatt: 'кВт',
                 home: 'Дім',
                 elevator: 'Ліфт',
-                water: 'Вода'
+                water: 'Вода',
+                touTitle: '🔋 Таблиця TOU',
+                touWritten: '✓ в інверторі',
+                touOff: 'лише рекомендація',
+                touPending: 'ще не в інверторі',
+                touFailed: 'не записано',
+                touToday: 'Сьогодні',
+                touTomorrow: 'Завтра',
+                touBoth: 'Сьогодні і завтра',
+                touFrom: 'з',
+                touCharge: 'заряд від мережі',
+                touSafe: 'Безпечна таблиця 90/45',
+                touKept: 'План від',
+                touStale: 'План не оновлювався з',
+                touNone: 'Плану на сьогодні немає'
             }
         };
 
@@ -656,7 +728,10 @@
             daysKey: null,
             datesSeen: new Set(),
             slotsSeen: {},          // "date|line" → slots as last shown, to flash the hours that change
-            isFirst: true
+            isFirst: true,
+            touAt: 0,               // when the TOU table was last asked for
+            touKey: null,
+            touDenied: false        // not the owner (or no table here): not asked again
         };
 
         const t = key => i18n[state.lang]?.[key] ?? i18n.en[key] ?? key;
@@ -903,6 +978,84 @@
             }));
         };
 
+        const BOLT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+            'stroke-linejoin="round" aria-hidden="true"><path d="M13 3 5 13h6l-1 8 8-10h-6z"/></svg>';
+
+        // "07" on whole hours, "16:45" when a table has a quarter-hour charge; the day's end is 24.
+        const touTime = (minute, whole) => {
+            const h = String(Math.floor(minute / 60)).padStart(2, '0');
+            return whole ? h : `${h}:${String(minute % 60).padStart(2, '0')}`;
+        };
+
+        // deye-reserve's table, as the server merged it: a row per range (23–07 runs past midnight), the
+        // one the inverter is in now in the accent colour; tomorrow's too when it differs, with when it starts.
+        const renderTou = data => {
+            const body = [];
+            if (data.fallback) {
+                const lead = data.kept_from ? `${t('touKept')} ${data.kept_from}` : t('touSafe');
+                body.push(el('div', 'tou-note', `⚠️ ${lead}: ${data.fallback}`));
+            }
+            if (data.stale) body.push(el('div', 'tou-note', `⚠️ ${t('touStale')} ${data.at}`));
+            data.blocks.forEach(block => {
+                const title = { today: 'touToday', tomorrow: 'touTomorrow', both: 'touBoth' }[block.kind];
+                const from = block.from ? ` · ${t('touFrom')} ${block.from}` : '';
+                body.push(el('div', 'line-title', `${t(title)}, ${block.dates}${from}`));
+                const whole = block.ranges.every(r => r.start % 60 === 0 && r.end % 60 === 0);
+                const rows = el('div', 'tou-rows');
+                block.ranges.forEach(r => {
+                    const cls = `${r.now ? ' now' : ''}${r.charge ? ' charge' : ''}`;
+                    const bar = el('div', `tou-bar${cls}`);
+                    const fill = el('div');
+                    fill.style.width = `${r.soc}%`;
+                    bar.appendChild(fill);
+                    const bolt = el('div', `tou-bolt${cls}`);
+                    if (r.charge) {
+                        bolt.innerHTML = BOLT;
+                        bolt.title = t('touCharge');
+                    }
+                    rows.append(el('div', `tou-time${cls}`, `${touTime(r.start, whole)}–${touTime(r.end, whole)}`),
+                        bar, el('div', `tou-soc${cls}`, `${r.soc}%`), bolt);
+                });
+                body.push(rows);
+            });
+            if (!data.blocks.length) body.push(el('div', 'empty-state', t('touNone')));
+            if (data.why) {
+                const why = el('div', 'tou-why');
+                why.append(el('span', 'tou-why-at', data.why.at), data.why.reasons.join('; '));
+                body.push(why);
+            }
+            $('touBody').replaceChildren(...body);
+            const status = { written: 'touWritten', off: 'touOff', pending: 'touPending', failed: 'touFailed' }[data.status];
+            $('touStatus').textContent = status ? t(status) : '';
+            $('touStatus').className = `tou-status ${data.status || ''}`;
+            $('touCard').classList.remove('hidden');
+        };
+
+        // Asked for only inside Telegram, with its signed initData; anyone but the owner gets 403 once and the
+        // page stays as it was. A failed refresh keeps the table shown.
+        const fetchTou = async () => {
+            const initData = state.tg?.initData;
+            if (!initData || state.touDenied || Date.now() - state.touAt < TOU_REFRESH) return;
+            state.touAt = Date.now();
+            try {
+                const res = await fetch(`${TOU_ENDPOINT}?_t=${Date.now()}`, { headers: { 'X-Telegram-Init-Data': initData } });
+                if (res.status === 403 || res.status === 404) {
+                    state.touDenied = true;
+                    $('touCard').classList.add('hidden');
+                    return;
+                }
+                if (!res.ok) return;
+                const data = await res.json();
+                const key = `${state.lang}|${JSON.stringify(data)}`;
+                if (key !== state.touKey) {
+                    state.touKey = key;
+                    renderTou(data);
+                }
+            } catch (err) {
+                console.error('TOU fetch error:', err);
+            }
+        };
+
         const renderNotices = data => {
             const notes = [];
             if (data.schedules_suspended) notes.push(t('suspended'));
@@ -935,6 +1088,7 @@
                 renderNotices(data);
                 renderInverter(data.inverter);
                 renderBatteries(data.batteries || []);
+                if (data.inverter) fetchTou();
 
                 // Rebuilt only when the schedule or the highlighted hour changes, and then without the
                 // card fade-in: replacing the cards on every 10 s refresh made them jump up each time.

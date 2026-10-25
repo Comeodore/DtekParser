@@ -32,6 +32,7 @@ class Config:
     bot_token: str
     chat_id: str
     dry_run: bool
+    table_messages: bool        # a day's table in the chat on news; off: the krem mini app shows it to the owner
     # Where things are
     dtek_url: str               # dtek-service, krem's port
     group: str                  # DTEK queue of the house
@@ -149,6 +150,7 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
         bot_token=_require(env, f"BOT_{bot}_TOKEN"),
         chat_id=_require(env, "DEYE_RESERVE_CHAT_ID"),
         dry_run=_bool(env, "DEYE_RESERVE_DRY_RUN", False),
+        table_messages=_bool(env, "DEYE_RESERVE_TABLE_MESSAGES", False),
         dtek_url=_get(env, "DEYE_RESERVE_DTEK_URL", "http://127.0.0.1:9998").rstrip("/"),
         group=_get(env, "DEYE_RESERVE_GROUP", "GPV2.2"),
         latitude=_num(env, "DEYE_RESERVE_LATITUDE", 50.3084),

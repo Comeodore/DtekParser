@@ -60,11 +60,18 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   polls the schedule every 10 min as a fallback, replans hourly, after
   the 05:30 and 22:00 forecast refresh, and when tomorrow's table takes
   over (23:00, or earlier once it does the same as today's for the rest of
-  the day). The owner's own chat (`DEYE_RESERVE_CHAT_ID`, through the krem
-  bot) hears about a day whose DTEK schedule was published, or changed so
-  that the day's table changed: that day's final table, sent once it is in
-  the inverter (a line is added only when it is not; tomorrow's says when
-  it goes in), plus an alarm when a write fails. During an outage the
+  the day). The owner sees the tables at the bottom of the krem mini app,
+  and only the owner: the page sends Telegram's signed initData, and
+  dtek-service checks it with the krem bot's token and shows the table only
+  to `DEYE_RESERVE_OWNER_ID` (else the private `DEYE_RESERVE_CHAT_ID`), at
+  `/api/v1/reserve/table`. Each table is a range a row (slots in a row with
+  the same target are one, 23–07 runs past midnight), the one the inverter
+  is in now marked, tomorrow's too when it differs with when it takes over,
+  whether the inverter has it, and why it last changed. In the owner's own
+  chat (`DEYE_RESERVE_CHAT_ID`, through the krem bot) a day's table went out
+  whenever it changed, with the reason under it; that is off since 25.10
+  (`DEYE_RESERVE_TABLE_MESSAGES=true` brings it back). The chat still gets
+  an alarm when a write fails. During an outage the
   inverter reading is looked at every 3 min, and the owner is warned once
   when at the present load the battery will not last until the grid is due
   back. With

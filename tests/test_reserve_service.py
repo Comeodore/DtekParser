@@ -26,6 +26,8 @@ ENV = {
     "DEYE_DEVICE_SN": "2511090098",
     "BOT_SCHEDULEBOT_TOKEN": "2:b",
     "DEYE_RESERVE_CHAT_ID": "370921204",
+    # Most tests read the table messages; off, the default, is tested on its own.
+    "DEYE_RESERVE_TABLE_MESSAGES": "true",
     # The Open-Meteo fixtures of 17.10 are horizontal radiation, with the factor the panels had for it then.
     "DEYE_RESERVE_PV_PER_GTI": "5.35",
 }
@@ -439,8 +441,9 @@ async def test_http_endpoints(make):
 
 
 def test_config_defaults_and_checks():
-    cfg = load_config({k: v for k, v in ENV.items() if k != "DEYE_RESERVE_PV_PER_GTI"})
+    cfg = load_config({k: v for k, v in ENV.items() if k not in ("DEYE_RESERVE_PV_PER_GTI", "DEYE_RESERVE_TABLE_MESSAGES")})
     assert (cfg.write, cfg.port, cfg.host, cfg.group, cfg.chat_id) == (False, 9997, "127.0.0.1", "GPV2.2", "370921204")
+    assert cfg.table_messages is False and load_config(ENV).table_messages is True
     assert (cfg.pv_per_gti, cfg.tilt, cfg.azimuth) == (4.4, 30.0, 0.0)
     assert (cfg.watch_s, cfg.alert_margin_min, cfg.alert_unscheduled_h) == (180.0, 30.0, 2.0)
     assert cfg.params == Params() and cfg.debounce_s == 150 and cfg.max_writes_per_day == 6
@@ -843,3 +846,73 @@ def test_a_charge_capped_below_80_a_points_at_the_bms():
     assert text.endswith("схоже, обмежує BMS батареї")
     over = render_charge([[s[0], 4300.0, 4800.0, 500.0, s[4]] for s in samples], Params())
     assert "⚠️ Імпорт доходив до 4.80 кВт — більше за 4.5" in over and "BMS" not in over
+
+
+# ---- table messages off (the default): the mini app shows the tables, the chat only what is urgent ----
+
+async def test_with_table_messages_off_the_news_is_kept_for_the_mini_app(make):
+    service, clock = make(DEYE_RESERVE_TABLE_MESSAGES="false")
+    await ready(service, clock["now"])
+    report = await service.replan(clock["now"], "test")
+    assert service.messenger.texts == []
+    rows = [r for r in service.journal.read() if r["kind"] == "message"]
+    assert table_news(rows) == [("2026-10-17", False)]
+    assert rows[0]["reasons"][0] == "опубліковано графік на 17.10"
+    assert service.state.why["2026-10-17"] == {"at": clock["now"].isoformat(), "reasons": rows[0]["reasons"]}
+    assert service.state.sent_tables["2026-10-17"] == [[s.start, s.soc, s.grid_charge] for s in report.table]
+    body = service.plan_payload()
+    assert body["why"] == service.state.why and body["write"] is False and body["written_table"] is None
+    assert any(" TABLE day 2026-10-17 (off, not sent): опубліковано графік на 17.10" in line
+               for line in decisions(service.journal.read()))
+    # Tomorrow published: news again, still not in the chat.
+    service.sources.payload = with_tomorrow(service.sources.payload, {9, 10, 11})
+    clock["now"] += timedelta(minutes=5)
+    await service.replan(clock["now"], "schedule")
+    assert service.messenger.texts == [] and service.state.why["2026-10-18"]["reasons"][0] == "опубліковано графік на 18.10"
+    assert table_news(service.journal.read()) == [("2026-10-17", False), ("2026-10-18", False)]
+
+
+def table_news(rows):
+    return [(r["day"], r["sent"]) for r in rows if r["kind"] == "message"]
+
+
+async def test_with_table_messages_off_a_written_table_is_quiet_and_shown_as_written(make):
+    service, clock = make(now=T(17, 18), DEYE_RESERVE_WRITE="true", DEYE_RESERVE_TABLE_MESSAGES="false")
+    await ready(service, clock["now"])
+    report = await service.replan(clock["now"], "test")
+    assert len(service.deye.updates) == 1 and service.messenger.texts == []
+    body = service.plan_payload()
+    assert body["write"] is True and body["last_write"]["ok"] is True
+    assert body["written_table"] == [{"start": s.start, "soc": s.soc, "grid_charge": s.grid_charge} for s in report.table]
+
+
+async def test_with_table_messages_off_a_failed_write_is_still_an_alarm(make):
+    service, clock = make(now=T(17, 18), DEYE_RESERVE_WRITE="true", DEYE_RESERVE_TABLE_MESSAGES="false")
+    service._sleep = Slept()
+    await ready(service, clock["now"])
+    with_errors(service, [500] * 4, "540")
+    await service.replan(clock["now"], "test")
+    # The table news went to the mini app; the failure, which a table message would have carried, is an alarm.
+    assert len(service.messenger.texts) == 1
+    assert service.messenger.texts[0].startswith("🚨 <b>Запис TOU не вдався</b>\n4 спроби з паузою 5 хв, остання: ")
+    assert "Планувалось:\n<pre>00:00" in service.messenger.texts[0]
+    assert service.plan_payload()["last_write"]["ok"] is False and service.state.why["2026-10-17"]
+
+
+async def test_with_table_messages_off_the_battery_alert_still_goes(make):
+    service, clock = make(now=T(17, 15, 10), DEYE_RESERVE_TABLE_MESSAGES="false")
+    service.sources.reading = {"soc": 20.0, "grid_present": False, "load_w": 950.0, "pv_w": 50.0}
+    await service.watch(clock["now"])
+    assert len(service.messenger.texts) == 1 and service.messenger.texts[0].startswith("🪫 <b>Батареї може не вистачити")
+
+
+async def test_the_reasons_come_back_from_the_journal_when_the_state_has_none(make):
+    service, clock = make(DEYE_RESERVE_TABLE_MESSAGES="false")
+    await ready(service, clock["now"])
+    await service.replan(clock["now"], "test")
+    why = dict(service.state.why)
+    service.state.why = {}
+    service._save()
+    restarted, _ = make(now=clock["now"] + timedelta(minutes=1))
+    assert restarted.state.why == why and why["2026-10-17"]["reasons"][0] == "опубліковано графік на 17.10"
+    assert make(now=T(18, 9))[0].state.why == {}                      # a day gone by stays out

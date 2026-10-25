@@ -2,8 +2,8 @@
 
 State as of 19.10.2026. The code is in `deye_reserve/`, tests in
 `tests/test_reserve_*.py`; dtek-service's side is `app/reserve_hook.py`,
-`app/api.py` (`/api/v1/inverter/latest`), `app/collector.py` and
-`app/inverter/deye.py` (webhooks).
+`app/api.py` (`/api/v1/inverter/latest`, the owner's `/api/v1/reserve/table`),
+`app/webapp_auth.py`, `app/collector.py` and `app/inverter/deye.py` (webhooks).
 
 ## Goal
 
@@ -140,9 +140,36 @@ the whole import, house and charger, under 4.5 kW.
   table at its switch time. A manual change in the Deye app stays until
   then.
 
+## The table in the krem mini app (owner only, since 25.10)
+
+- At the bottom of the krem mini app, for the owner's Telegram user only
+  (`DEYE_RESERVE_OWNER_ID`, else `DEYE_RESERVE_CHAT_ID` when it is a
+  private chat). The page sends `Telegram.WebApp.initData` in
+  `X-Telegram-Init-Data`; dtek-service checks its hash with the krem bot's
+  token (`KREM_BOT`) by Telegram's rule, takes the user from it, and
+  refuses initData over a day old. Anyone else gets 403 once and the page
+  stays as it was; a plain browser has no initData and never asks.
+- `GET /api/v1/reserve/table` reads deye-reserve's `/plan` (cached 30 s):
+  the table the inverter holds now, as ranges (slots in a row with the
+  same SOC and grid charge are one; the last runs on past midnight into
+  the first when they are the same: 23–07), the one now marked; tomorrow's
+  too when it differs, with the time it takes over (`switch_at`), or one
+  table "today and tomorrow" when they are the same; whether it is in the
+  inverter (`written_table`, order status 666), only a recommendation
+  (writing off), not in yet, or the last write failed; the fallback, if
+  any; and the reasons of the last table news of a shown day (state.json
+  `why`).
+
 ## Messages (Telegram, the krem bot, owner's chat 370921204 only)
 
-- **A day's table**, as a code block in Ukrainian, when the day's DTEK
+- **Table messages are off since 25.10** (`DEYE_RESERVE_TABLE_MESSAGES`,
+  default false): the mini app shows the tables. The news below is still
+  worked out and kept: state.json `sent_tables`, `told` and `why`, and a
+  journal `message` row with `sent: false` (the review shows it as TABLE
+  … not sent). What still goes to the chat: the write alarm, now on every
+  write that fails for good (a table message used to carry it), and the
+  battery alert during an outage.
+- **A day's table** (with table messages on), as a code block in Ukrainian, when the day's DTEK
   schedule is first published, and again whenever the table changes,
   whatever changed it (since 19.10; before, only DTEK changes were told,
   so on 19.10 the chat showed night 55% while the inverter ran 85%).
@@ -206,7 +233,8 @@ the whole import, house and charger, under 4.5 kW.
   battery alert.
 - `reserve-data/solcast.jsonl`: Solcast's forecasts of 18–24.10, kept as
   they were; nothing writes there any more.
-- `GET 127.0.0.1:9997/plan` and `/health`.
+- `GET 127.0.0.1:9997/plan` (with `written_table`, `last_write` and
+  `why` for the mini app) and `/health`.
 - `docker exec deye-reserve python -m deye_reserve.review [END]` lines a
   day's decisions up with Deye's history (SOC, grid bought by tariff, SOC
   in each outage), the plan's own day-ahead and morning sun and every

@@ -16,8 +16,10 @@ from app.collector import SourceCollector
 from app.dtek.legacy import legacy_row
 from app.dtek.models import Snapshot
 from app.engine.periods import continues_into, current_period
+from app.reserve_hook import charge_table
 from app.service import Service
 from app.timeutil import KYIV_TZ, MINUTES_IN_DAY, format_moment, minute_of_day, now_kyiv
+from app.webapp_auth import webapp_user
 from app.wol import send_magic_packet
 
 logger = logging.getLogger(__name__)
@@ -165,6 +167,23 @@ def create_app(service: Service) -> FastAPI:
     @app.get("/api/v1/status")
     async def status(request: Request, source: Optional[str] = Query(None)):
         return schedule_payload(resolve(request, source), now_kyiv())["current_outage"]
+
+    @app.get("/api/v1/reserve/table")
+    async def reserve_table(request: Request, source: Optional[str] = Query(None)):
+        """deye-reserve's TOU tables in the inverter's mini app, for the owner only: who it is comes from the
+        Telegram initData the page sends (X-Telegram-Init-Data), checked against the source's bot token."""
+        collector, now = resolve(request, source), now_kyiv()
+        settings = service.settings
+        if settings.deye is None or collector.name != settings.deye.source or settings.owner_id is None \
+                or not service.reserve.url:
+            raise HTTPException(404, "no TOU table here")
+        user = webapp_user(request.headers.get("X-Telegram-Init-Data", ""), settings.bots[collector.config.bot], now)
+        if user is None or user["id"] != settings.owner_id:
+            raise HTTPException(403, "the owner's only")
+        plan = await service.reserve.plan()
+        if plan is None:
+            raise HTTPException(503, "deye-reserve has no plan")
+        return JSONResponse(charge_table(plan, now), headers=NO_CACHE)
 
     @app.get("/api/v1/inverter/latest")
     async def inverter_latest():

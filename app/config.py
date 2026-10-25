@@ -90,6 +90,7 @@ class Settings:
     state_dir: str = "data"     # per-source browser cookies, kept across restarts
     deye: Optional[DeyeConfig] = None
     reserve_url: Optional[str] = None   # deye-reserve, told when the inverter's schedule or grid changes
+    owner_id: Optional[int] = None      # the Telegram user who alone sees deye-reserve's table in the mini app
 
     def source(self, name: str) -> SourceConfig:
         return next(s for s in self.sources if s.name == name)
@@ -175,6 +176,17 @@ def _source(env: Mapping[str, str], name: str, index: int) -> SourceConfig:
     )
 
 
+def _owner(env: Mapping[str, str]) -> Optional[int]:
+    """DEYE_RESERVE_OWNER_ID, else deye-reserve's own chat when it is a private one: its id is the user's."""
+    if _get(env, "DEYE_RESERVE_OWNER_ID") is not None:
+        owner = _int(env, "DEYE_RESERVE_OWNER_ID")
+        if owner <= 0:
+            raise ConfigError("DEYE_RESERVE_OWNER_ID must be a Telegram user id")
+        return owner
+    chat = _get(env, "DEYE_RESERVE_CHAT_ID") or ""
+    return int(chat) if chat.isdigit() else None
+
+
 def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
     env = os.environ if env is None else env
     names = [n.strip().lower() for n in (_get(env, "SOURCES") or "").split(",") if n.strip()]
@@ -256,4 +268,5 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         state_dir=_get(env, "STATE_DIR", "data"),
         deye=deye,
         reserve_url=_get(env, "DEYE_RESERVE_URL") if deye is not None else None,
+        owner_id=_owner(env) if deye is not None and _get(env, "DEYE_RESERVE_URL") else None,
     )

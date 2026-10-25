@@ -11,14 +11,17 @@ Replans happen
   differs from it any more).
 
 With DEYE_RESERVE_WRITE=true each replan also gets the table into the
-inverter when it differs, straight away, outage or not. The owner hears
-about a day whose DTEK schedule was published, and about every change of a
-day's table after that, whatever brought it (DTEK, the sun, the battery, the
-night gone by), with the reason under the table: the final table, sent once
-it is in the inverter (a line says so only when it is not); about a write
-that failed; and, during an outage, when the battery will not last until the
-grid is due back at the house's present load. The reasons behind every decision go to the journal
-(data/journal.jsonl), for the daily review.
+inverter when it differs, straight away, outage or not. A day's table is news
+when its DTEK schedule is published and at every change after that, whatever
+brought it (DTEK, the sun, the battery, the night gone by), with the reason
+for it. With DEYE_RESERVE_TABLE_MESSAGES=true the owner gets that news in the
+chat: the final table, sent once it is in the inverter (a line says so only
+when it is not), the reason under it. Off (the default), the krem mini app
+shows the owner the tables and the last reason (/plan). Either way the owner
+hears about a write that failed and, during an outage, when the battery will
+not last until the grid is due back at the house's present load. The reasons
+behind every decision go to the journal (data/journal.jsonl), for the daily
+review.
 """
 from __future__ import annotations
 
@@ -103,6 +106,12 @@ class ReserveService:
         self.state = load_state(self._state_path)
         self.journal = Journal(config.data_dir / "journal.jsonl")
         self.journal.prune(clock())
+        if not self.state.why:
+            # state.json kept no reasons before 25.10: the journal's table news for the days still ahead.
+            today = local(clock()).date().isoformat()
+            for row in self.journal.read(since=clock() - timedelta(days=2)):
+                if row["kind"] == "message" and (row.get("day") or "") >= today and row.get("reasons"):
+                    self.state.why[row["day"]] = {"at": row["at"], "reasons": row["reasons"]}
         self.forecast: Optional[Forecast] = None
         self.load: Optional[LoadProfile] = None
         # All models by fit to the panels, best first: only watched, the sun comes from cfg.sun_models.
@@ -393,7 +402,9 @@ class ReserveService:
                     outcome: tuple[str, str], restarted: bool = False) -> None:
         """The chat follows the inverter: a day's table goes out when its DTEK schedule is first published, and
         again whenever it changes, for whatever reason, with that reason under it. Today, and tomorrow once DTEK
-        published it or its table took over; a failed write with no such news gets an alarm."""
+        published it or its table took over; a failed write with no such news gets an alarm. With table messages
+        off the news is only noted (state `why`, the journal) for the mini app, and every failed write is an
+        alarm."""
         today = local(now).date()
         tomorrow = today + timedelta(days=1)
         news = changed_days(self.state.sent_schedule, schedule.days, today) if schedule is not None else []
@@ -417,17 +428,24 @@ class ReserveService:
             elif table_to_list(table) != (sent if sent is not None else self._last_shown(day)):
                 tell.append(day)
         delivered = True
+        sent = bool(tell) and self.cfg.table_messages
         ctx = self._context(report, now)
         if tell:
             reasons = self._reasons(report, now, tell, schedule, restarted, ctx)
-            delivered = await self.messenger.send(render_days(tell, today, report, outcome, reasons))
+            if sent:
+                delivered = await self.messenger.send(render_days(tell, today, report, outcome, reasons))
+            else:
+                logger.info(f"table news for {', '.join(f'{d:%d.%m}' for d in tell)}, not sent "
+                            f"(table messages off): {'; '.join(reasons)}")
             if delivered:
                 for day in tell:
                     self.state.sent_tables[day.isoformat()] = table_to_list(report.tables[day])
-                    self.journal.add("message", now, day=day.isoformat(), outcome=outcome[0], reasons=reasons)
+                    self.state.why[day.isoformat()] = {"at": now.isoformat(), "reasons": reasons}
+                    self.journal.add("message", now, day=day.isoformat(), outcome=outcome[0], reasons=reasons,
+                                     sent=sent)
                 self.state.told = ctx
                 self._prune_sent(today)
-        elif outcome[0] == "failed":
+        if outcome[0] == "failed" and not sent:
             await self.messenger.send(render_alarm(report.table, outcome[1]))
             self.journal.add("message", now, day=None, outcome="failed")
         if news and delivered:
@@ -448,6 +466,7 @@ class ReserveService:
         if earlier:
             keep.add(max(earlier))
         self.state.sent_tables = {d: t for d, t in self.state.sent_tables.items() if d in keep}
+        self.state.why = {d: w for d, w in self.state.why.items() if d >= today.isoformat()}
 
     def _context(self, report: Report, now: datetime) -> dict:
         """What a plan rested on, kept with each table message: the next one says what changed since."""
@@ -784,7 +803,14 @@ class ReserveService:
                 "tables": {d.isoformat(): [s.__dict__ for s in t] for d, t in sorted(r.tables.items())},
                 "switch_at": r.switch_at.isoformat() if r.switch_at else None,
                 "kept_from": r.kept_from.isoformat() if r.kept_from else None,
-                "soc": r.soc, "grid_present": r.grid_present, "notes": r.notes}
+                "soc": r.soc, "grid_present": r.grid_present, "notes": r.notes,
+                # For the krem mini app: what the inverter took, and why each day's table is what it is.
+                "write": self.cfg.write,
+                "written_table": [{"start": a, "soc": b, "grid_charge": c} for a, b, c in self.state.written_table]
+                if self.state.written_table else None,
+                "last_write": {"at": self.state.last_write["at"], "ok": self.state.last_write["ok"]}
+                if self.state.last_write else None,
+                "why": self.state.why}
         if r.plan is not None:
             p = r.plan
             body.update(night=p.night, safe=p.safe, kept_previous=p.kept_previous, calibration=p.calibration,

@@ -1,6 +1,9 @@
-"""dtek-service's side of deye-reserve: the inverter endpoint and the webhooks."""
+"""dtek-service's side of deye-reserve: the inverter endpoint, the webhooks and the owner's table."""
+import hashlib
+import hmac
 import json
 from dataclasses import replace
+from urllib.parse import urlencode
 
 import pytest
 
@@ -14,9 +17,10 @@ from app.config import ConfigError, load_settings
 from app.inverter.deye import InverterMonitor, parse_device_latest
 from app.notify.router import Router
 from app.power.state import PowerState, PowerStatus
-from app.reserve_hook import ReserveHook
+from app.reserve_hook import ReserveHook, charge_table, ranges
 from app.service import Service
 from app.storage.memory import MemoryStore
+from app.webapp_auth import webapp_user
 from tests.conftest import BASE_ENV, kyiv
 from tests.test_collector import DAY_OCT1, FakeSite, fact, hours
 from deye_reserve.config import load_config
@@ -187,3 +191,136 @@ def test_the_krem_mini_app_gets_the_grid_by_tariff(monkeypatch, tmp_path):
     inv = TestClient(create_app(service)).get("/api/v1/schedule?source=krem").json()["inverter"]
     assert (inv["grid_today_kwh"], inv["grid_night_kwh"], inv["grid_day_kwh"]) == (8.0, 2.5, 5.5)
     assert (tmp_path / "grid-day-krem.json").exists()
+
+
+# ---- deye-reserve's table in the krem mini app, for the owner only ----
+
+def slots(*rows):
+    return [{"start": a, "soc": b, "grid_charge": c} for a, b, c in rows]
+
+
+NIGHT_70 = slots((0, 70, True), (420, 45, False), (660, 45, False), (900, 45, False), (1140, 45, False),
+                 (1380, 70, True))
+TOP_UP = slots((0, 70, True), (420, 45, False), (660, 45, False), (1020, 61, True), (1080, 45, False),
+               (1380, 70, True))
+
+
+def span(rows):
+    return [(r["start"], r["end"], r["soc"], r["charge"]) for r in rows]
+
+
+def test_slots_in_a_row_with_the_same_target_are_one_range():
+    as_lists = lambda t: [[s["start"], s["soc"], s["grid_charge"]] for s in t]
+    # The night runs on past midnight: 23:00 and 00:00 at 70% with the grid are one range, 23-07.
+    assert span(ranges(as_lists(NIGHT_70))) == [(420, 1380, 45, False), (1380, 420, 70, True)]
+    assert span(ranges(as_lists(TOP_UP))) == [(420, 1020, 45, False), (1020, 1080, 61, True), (1080, 1380, 45, False),
+                                              (1380, 420, 70, True)]
+    # Last night's 75% and tonight's 70% stay apart; so do the same SOC with and without the grid.
+    assert span(ranges([[1380, 70, True], [0, 75, True], [420, 45, False], [660, 45, True], [900, 45, False],
+                        [1140, 45, False]])) == [(0, 420, 75, True), (420, 660, 45, False), (660, 900, 45, True),
+                                                 (900, 1380, 45, False), (1380, 1440, 70, True)]
+    assert span(ranges([[m, 45, False] for m in (0, 240, 480, 720, 960, 1200)])) == [(0, 1440, 45, False)]
+    assert ranges([]) == []
+
+
+def plan_body(today, tomorrow, at="2026-10-25T15:00:00+02:00", switch_at="2026-10-25T00:00:00+03:00", **more):
+    return {"at": at, "table": today, "tables": {"2026-10-25": today, "2026-10-26": tomorrow},
+            "switch_at": switch_at, "fallback": None, "kept_from": None, "write": True,
+            "written_table": today, "last_write": {"at": "2026-10-25T07:24:04+02:00", "ok": True}, "why": {}, **more}
+
+
+def test_today_and_tomorrow_are_one_table_when_they_are_the_same():
+    body = charge_table(plan_body(NIGHT_70, NIGHT_70, why={
+        "2026-10-25": {"at": "2026-10-25T07:16:00+02:00", "reasons": ["нічний заряд позаду"]},
+        "2026-10-26": {"at": "2026-10-25T20:10:00+02:00", "reasons": ["опубліковано графік на 26.10"]},
+        "2026-10-24": {"at": "2026-10-24T23:00:00+02:00", "reasons": ["вчорашнє"]}}, at="2026-10-25T20:10:51+02:00"),
+        kyiv(2026, 10, 25, 21, 0))
+    assert [(b["kind"], b["dates"], b["current"], b["from"]) for b in body["blocks"]] == [("both", "25–26.10", True, None)]
+    assert [r["now"] for r in body["blocks"][0]["ranges"]] == [True, False]
+    assert body["status"] == "written" and not body["stale"] and body["at"] == "20:10"
+    assert body["why"] == {"at": "20:10", "reasons": ["опубліковано графік на 26.10"]}      # the latest shown day's
+
+
+def test_tomorrows_table_is_shown_when_it_differs_with_the_time_it_takes_over():
+    plan = plan_body(NIGHT_70, TOP_UP, switch_at="2026-10-25T23:00:00+02:00")
+    body = charge_table(plan, kyiv(2026, 10, 25, 2, 30))                     # in last night's charge
+    assert [(b["kind"], b["dates"], b["current"], b["from"]) for b in body["blocks"]] == [
+        ("today", "25.10", True, None), ("tomorrow", "26.10", False, "23:00")]
+    assert [r.get("now") for r in body["blocks"][0]["ranges"]] == [False, True]
+    assert all("now" not in r for r in body["blocks"][1]["ranges"]) and body["status"] == "written"
+    # 23:30: tomorrow's took over, and it is the inverter's when written.
+    late = charge_table({**plan, "written_table": TOP_UP}, kyiv(2026, 10, 25, 23, 30))
+    assert [(b["kind"], b["current"]) for b in late["blocks"]] == [("tomorrow", True)] and late["status"] == "written"
+    assert [r["now"] for r in late["blocks"][0]["ranges"]] == [False, False, False, True]
+    # Not taken yet, written off, or the last write failed.
+    assert charge_table(plan, kyiv(2026, 10, 25, 23, 30))["status"] == "pending"
+    assert charge_table({**plan, "write": False, "written_table": None}, kyiv(2026, 10, 25, 23, 30))["status"] == "off"
+    failed = {**plan, "last_write": {"at": "2026-10-25T23:00:30+02:00", "ok": False}}
+    assert charge_table(failed, kyiv(2026, 10, 25, 23, 30))["status"] == "failed"
+    # An old plan says so.
+    assert charge_table(plan, kyiv(2026, 10, 25, 17, 30))["stale"]
+
+
+def init_data(user_id=370921204, token="2:b", signed=None, **fields):
+    """initData as Telegram signs it (core.telegram.org/bots/webapps), written out here on its own."""
+    fields = {"query_id": "AAHk0BIWAAAAAOTQEhb_x1Yd", "user": json.dumps({"id": user_id, "first_name": "В"}),
+              "auth_date": str(int((signed or kyiv(2026, 10, 25, 20, 55)).timestamp())), "signature": "c2lnbmF0dXJl",
+              **fields}
+    check = "\n".join(f"{k}={v}" for k, v in sorted(fields.items()))
+    secret = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
+    return urlencode({**fields, "hash": hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()})
+
+
+def owner_app(monkeypatch, plan=None, **env):
+    service = Service(load_settings({**BASE_ENV, **DEYE_ENV, "DEYE_RESERVE_URL": "http://127.0.0.1:9997",
+                                     "DEYE_RESERVE_CHAT_ID": "370921204", **env}),
+                      store=MemoryStore(), gateway=object())
+    monkeypatch.setattr("app.api.now_kyiv", lambda: kyiv(2026, 10, 25, 21, 0))
+
+    async def fake_plan():
+        return plan
+    service.reserve.plan = fake_plan
+    return service, TestClient(create_app(service))
+
+
+def test_only_the_owner_gets_the_table(monkeypatch):
+    service, http = owner_app(monkeypatch, plan_body(NIGHT_70, NIGHT_70))
+    assert service.settings.owner_id == 370921204
+
+    def get(data=None, source="krem"):
+        headers = {"X-Telegram-Init-Data": data} if data is not None else {}
+        return http.get(f"/api/v1/reserve/table?source={source}", headers=headers)
+    r = get(init_data())
+    assert r.status_code == 200 and r.json()["blocks"][0]["kind"] == "both"
+    assert get().status_code == 403                                              # a plain browser
+    assert get("").status_code == 403
+    assert get(init_data(user_id=12345)).status_code == 403                      # someone else in the krem chats
+    assert get(init_data(token="1:a")).status_code == 403                        # signed by another bot
+    assert get(init_data(signed=kyiv(2026, 10, 23, 20, 0))).status_code == 403   # two days old
+    forged = init_data().replace("370921204", "370921205")
+    assert get(forged).status_code == 403
+    assert get(init_data() + "&user=%7B%22id%22%3A370921204%7D").status_code == 403    # a field twice
+    assert get(init_data(), source="kem").status_code == 404                     # no inverter there
+    # deye-reserve not there: no table, and no secret either.
+    _, down = owner_app(monkeypatch, None)
+    assert down.get("/api/v1/reserve/table?source=krem",
+                    headers={"X-Telegram-Init-Data": init_data()}).status_code == 503
+
+
+def test_the_owner_is_deye_reserves_private_chat_unless_set():
+    env = {**BASE_ENV, **DEYE_ENV, "DEYE_RESERVE_URL": "http://127.0.0.1:9997"}
+    assert load_settings({**env, "DEYE_RESERVE_CHAT_ID": "370921204"}).owner_id == 370921204
+    assert load_settings({**env, "DEYE_RESERVE_CHAT_ID": "-1001234", "DEYE_RESERVE_OWNER_ID": "42"}).owner_id == 42
+    assert load_settings({**env, "DEYE_RESERVE_CHAT_ID": "-1001234"}).owner_id is None      # a group
+    assert load_settings({**BASE_ENV, **DEYE_ENV, "DEYE_RESERVE_CHAT_ID": "370921204"}).owner_id is None
+    with pytest.raises(ConfigError, match="OWNER_ID"):
+        load_settings({**env, "DEYE_RESERVE_OWNER_ID": "-5"})
+
+
+def test_init_data_is_checked_by_telegrams_rule():
+    now = kyiv(2026, 10, 25, 21, 0)
+    assert webapp_user(init_data(), "2:b", now)["id"] == 370921204
+    assert webapp_user(init_data(), "2:b", kyiv(2026, 10, 27, 21, 0)) is None          # over a day old
+    assert webapp_user(init_data(user="not json"), "2:b", now) is None
+    assert webapp_user("hash=abc", "2:b", now) is None and webapp_user("%%%", "2:b", now) is None
+    assert webapp_user(init_data(), "", now) is None
