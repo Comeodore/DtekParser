@@ -1,5 +1,6 @@
 """deye-reserve around the planner: inputs, messages, events, and the (normally off) write path."""
 import copy
+import logging
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -8,7 +9,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from deye_reserve.config import ConfigError, load_config
 from deye_reserve.deye import parse_tou, tou_request
 from deye_reserve.inputs import Forecast, InputError, changed_days, combine_forecast, parse_schedule, rank_models
-from deye_reserve.messages import change_reasons, night_line, render_charge
+from deye_reserve.messages import change_reasons, night_line, range_line, render_charge
 from deye_reserve.net import HttpSources
 from deye_reserve.planner import Params, Slot, safe_table
 from deye_reserve.review import actual, decisions, sun_lines, with_mix
@@ -916,3 +917,49 @@ async def test_the_reasons_come_back_from_the_journal_when_the_state_has_none(ma
     restarted, _ = make(now=clock["now"] + timedelta(minutes=1))
     assert restarted.state.why == why and why["2026-10-17"]["reasons"][0] == "опубліковано графік на 17.10"
     assert make(now=T(18, 9))[0].state.why == {}                      # a day gone by stays out
+
+
+
+# ---- every day's table news goes to the log, chat or not ----
+
+def test_a_table_in_the_log_reads_as_ranges():
+    night = (Slot(0, 70, True), Slot(420, 45, False), Slot(660, 45, False), Slot(900, 45, False),
+             Slot(1140, 45, False), Slot(1380, 70, True))
+    assert range_line(night) == "07–23 45% · 23–07 70% ⚡"
+    top_up = (Slot(0, 75, True), Slot(420, 45, False), Slot(855, 61, True), Slot(915, 45, False),
+              Slot(1140, 45, False), Slot(1380, 70, True))
+    assert range_line(top_up) == "00:00–07:00 75% ⚡ · 07:00–14:15 45% · 14:15–15:15 61% ⚡ · 15:15–23:00 45% · " \
+                                 "23:00–24:00 70% ⚡"
+    assert range_line(tuple(Slot(m, 45, False) for m in (0, 240, 480, 720, 960, 1200))) == "00–24 45%"
+
+
+def news_lines(caplog):
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith("table for ")]
+
+
+async def test_table_news_is_logged_with_messages_off(make, caplog):
+    caplog.set_level(logging.INFO, logger="deye_reserve.service")
+    service, clock = make(DEYE_RESERVE_TABLE_MESSAGES="false")
+    await ready(service, clock["now"])
+    report = await service.replan(clock["now"], "test")
+    assert service.messenger.texts == []
+    [line] = news_lines(caplog)
+    assert line.startswith(f"table for 17.10: {range_line(report.table)}; a recommendation, writing is off; "
+                           "Причина: опубліковано графік на 17.10; ніч під 18.10: прогноз сонця ")
+    assert line.endswith("; chat: off")
+    # Nothing new: nothing logged.
+    clock["now"] += timedelta(minutes=30)
+    await service.replan(clock["now"], "hourly")
+    assert len(news_lines(caplog)) == 1
+
+
+async def test_table_news_is_logged_with_messages_on_too(make, caplog):
+    caplog.set_level(logging.INFO, logger="deye_reserve.service")
+    service, clock, report = await plan_with_tomorrow(make, T(17, 12), DEYE_RESERVE_WRITE="true")
+    assert len(service.messenger.texts) == 1
+    today, tomorrow = news_lines(caplog)
+    assert today.startswith(f"table for 17.10: {range_line(report.tables[date(2026, 10, 17)])}; in the inverter; "
+                            "Причина: опубліковано графік на 17.10; опубліковано графік на 18.10")
+    assert tomorrow.startswith(f"table for 18.10: {range_line(report.tables[date(2026, 10, 18)])}; "
+                               "takes over at 16:00; Причина: ")
+    assert today.endswith("; chat: sent") and tomorrow.endswith("; chat: sent")

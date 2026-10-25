@@ -166,7 +166,10 @@ the whole import, house and charger, under 4.5 kW.
   default false): the mini app shows the tables. The news below is still
   worked out and kept: state.json `sent_tables`, `told` and `why`, and a
   journal `message` row with `sent: false` (the review shows it as TABLE
-  … not sent). What still goes to the chat: the write alarm, now on every
+  … not sent). Every day's table news, chat or not, is also an INFO line
+  in `docker logs deye-reserve`: `table for 26.10: 07–23 45% · 23–07 70% ⚡;
+  in the inverter; Причина: …; chat: off` (`grep 'table for'`; or "takes
+  over at 23:00", "write failed: …"). What still goes to the chat: the write alarm, now on every
   write that fails for good (a table message used to carry it), and the
   battery alert during an outage.
 - **A day's table** (with table messages on), as a code block in Ukrainian, when the day's DTEK

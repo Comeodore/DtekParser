@@ -37,7 +37,8 @@ from deye_reserve.deye import ORDER_DONE, ORDER_ERRORS, ORDER_FINAL, DeyeError, 
 from deye_reserve.inputs import (Forecast, InputError, LoadProfile, Schedule, changed_days, combine_forecast,
                                  load_profile, parse_schedule, rank_models)
 from deye_reserve.journal import Journal
-from deye_reserve.messages import Report, change_reasons, night_line, render_alarm, render_battery, render_charge, render_days, table_line
+from deye_reserve.messages import (Report, change_reasons, log_line, night_line, render_alarm, render_battery,
+                                   render_charge, render_days, table_line)
 from deye_reserve.planner import Inputs, Planner, Table, local, safe_table, table_now, window
 from deye_reserve.state import (load_state, read_json, save_state, table_to_list, tables_from_dict, tables_to_dict,
                                 write_json)
@@ -434,9 +435,9 @@ class ReserveService:
             reasons = self._reasons(report, now, tell, schedule, restarted, ctx)
             if sent:
                 delivered = await self.messenger.send(render_days(tell, today, report, outcome, reasons))
-            else:
-                logger.info(f"table news for {', '.join(f'{d:%d.%m}' for d in tell)}, not sent "
-                            f"(table messages off): {'; '.join(reasons)}")
+            chat = ("sent" if delivered else "not delivered") if sent else "off"
+            for day in tell:
+                logger.info(log_line(day, today, report, outcome, reasons, chat))
             if delivered:
                 for day in tell:
                     self.state.sent_tables[day.isoformat()] = table_to_list(report.tables[day])

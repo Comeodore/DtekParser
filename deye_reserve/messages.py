@@ -102,6 +102,53 @@ def render_days(days: Sequence[date], today: date, report: Report, outcome: tupl
     return "\n\n".join(blocks)
 
 
+# ---- the same news in the log, a line a day ----
+
+def range_line(table: Sequence[Slot]) -> str:
+    """A table as the krem mini app shows it: slots in a row with the same target and charge are one range, and
+    the last runs on past midnight into the first when they are the same: "07–23 45% · 23–07 70% ⚡"."""
+    out: list[list] = []
+    for s in sorted(table, key=lambda s: s.start):
+        if out and (out[-1][2], out[-1][3]) == (s.soc, s.grid_charge):
+            continue
+        if out:
+            out[-1][1] = s.start
+        out.append([s.start, None, s.soc, s.grid_charge])
+    if len(out) == 1:
+        out = [[0, 24 * 60, out[0][2], out[0][3]]]
+    elif out:
+        out[-1][1] = out[0][0] or 24 * 60
+        if (out[0][2], out[0][3]) == (out[-1][2], out[-1][3]):
+            out[-1][1] = out.pop(0)[1]
+    whole = all(m % 60 == 0 for r in out for m in r[:2])
+
+    def hm(m: int) -> str:
+        return f"{m // 60:02d}" if whole else f"{m // 60:02d}:{m % 60:02d}"
+    return " · ".join(f"{hm(a)}–{hm(b)} {soc}%{' ⚡' if charge else ''}" for a, b, soc, charge in out)
+
+
+def log_line(day: date, today: date, report: Report, outcome: tuple[str, str], reasons: Sequence[str],
+             chat: str) -> str:
+    """A day's table news for the log, whether or not it went to the chat: "table for 26.10: 07–23 45% · 23–07
+    70% ⚡; in the inverter; Причина: …; chat: off"."""
+    table = report.tables.get(day, report.table)
+    kind, detail = outcome
+    if tuple(table) == tuple(report.table):
+        where = {"off": "a recommendation, writing is off", "already": "in the inverter", "written": "in the inverter",
+                 "blocked": f"not in the inverter yet: {detail}", "failed": f"write failed: {detail}"}[kind]
+    elif day > today and report.switch_at is not None:
+        at = local(report.switch_at)
+        where = f"takes over at {at:%H:%M}" if at.date() == today else "takes over after 00:00"
+    else:
+        where = "not in the inverter"
+    parts = [f"table for {day:%d.%m}: {range_line(table)}", where]
+    if report.fallback:
+        parts.append(f"fallback: {report.fallback}" + (f" (plan of {local(report.kept_from):%H:%M} kept)"
+                                                      if report.kept_from is not None else ""))
+    parts += [f"Причина: {'; '.join(reasons)}" if reasons else "Причина: —", f"chat: {chat}"]
+    return "; ".join(parts)
+
+
 # ---- why a table changed ----
 
 QUIET = ["power_on"] * 24
