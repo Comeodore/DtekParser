@@ -473,6 +473,20 @@
         }
         .tou-why-at { font-weight: 600; font-variant-numeric: tabular-nums; margin-right: 4px; }
 
+        /* After deye-reserve warned that the battery will not last, until the grid is back: until when it
+           lasts at the present load. */
+        .battery-left {
+            margin-top: var(--spacing-md);
+            padding: var(--spacing-sm) var(--spacing-md);
+            border-radius: var(--radius-md);
+            background: rgba(255, 69, 58, 0.15);
+            color: var(--text-off);
+            font-size: 13px;
+            font-weight: 600;
+            text-align: center;
+            font-variant-numeric: tabular-nums;
+        }
+
         .inverter-time { color: var(--text-primary); font-weight: 500; }
         .inverter.stale .hub { opacity: 0.5; }
         .inverter.stale .inverter-time { color: var(--text-warn); }
@@ -562,6 +576,7 @@
                         </div>
                     </div>
                 </div>
+                <div class="battery-left hidden" id="batteryLeft"></div>
                 <div class="inverter-footer">
                     <span data-i18n="inverter"></span>
                     <span class="inverter-time" id="inverterTime">-</span>
@@ -646,6 +661,7 @@
                 home: 'Home',
                 elevator: 'Elevator',
                 water: 'Water',
+                batteryLeft: 'At the present load the battery lasts until',
                 touTitle: '🔋 TOU table',
                 touWritten: '✓ in the inverter',
                 touOff: 'recommendation only',
@@ -705,6 +721,7 @@
                 home: 'Дім',
                 elevator: 'Ліфт',
                 water: 'Вода',
+                batteryLeft: 'При поточному споживанні заряду вистачить до',
                 touTitle: '🔋 Таблиця TOU',
                 touWritten: '✓ в інверторі',
                 touOff: 'лише рекомендація',
@@ -943,6 +960,9 @@
             batteryFlow.textContent = batteryCls ? `${flow > 0 ? '+' : '−'}${formatPower(flow)}` : t('battery');
             batteryFlow.className = batteryCls ? `hub-flow ${batteryCls}` : 'hub-label';
             $('hubBatteryLink').className = fromBattery ? 'hub-link to-home off' : charging ? 'hub-link to-side on' : 'hub-link';
+
+            $('batteryLeft').classList.toggle('hidden', !inv.battery_until);
+            if (inv.battery_until) $('batteryLeft').textContent = `🪫 ${t('batteryLeft')} ${inv.battery_until}`;
 
             node('hubHome', watts(inv.load_w), '');
             const main = Math.max(fromGrid, fromSun, fromBattery);

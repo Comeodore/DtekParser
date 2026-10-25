@@ -23,8 +23,9 @@ class ReserveHook:
     TIMEOUT_S = 5.0
     # The forecast changes twice a day; the mini app refreshes far more often.
     SUN_FRESH_S = 300.0
-    # The plan changes at most every few minutes.
+    # The plan changes at most every few minutes, the battery's time left every 3.
     PLAN_FRESH_S = 30.0
+    BATTERY_FRESH_S = 30.0
     GET_TIMEOUT_S = 2.0
 
     def __init__(self, url: Optional[str]):
@@ -42,6 +43,11 @@ class ReserveHook:
         """deye-reserve's /plan: every day's table, when tomorrow's takes over, what the inverter took and why;
         cached; None if not there."""
         return await self._get("plan", self.PLAN_FRESH_S)
+
+    async def battery(self) -> Optional[dict]:
+        """deye-reserve's /battery: once it warned that the battery will not last, until the grid is back, when
+        it runs down at the present load ({"at", "empty_at", ...}); None otherwise."""
+        return await self._get("battery", self.BATTERY_FRESH_S)
 
     async def _get(self, path: str, fresh_s: float) -> Optional[dict]:
         if not self.url:

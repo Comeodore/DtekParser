@@ -28,9 +28,10 @@ class Config:
     station_id: int
     device_sn: Optional[str]
     base_url: str
-    # Telegram: the krem bot, the owner's own chat only
+    # Telegram: the krem bot; the owner's own chat, and every krem chat for the battery alert
     bot_token: str
     chat_id: str
+    alert_chat_ids: tuple[str, ...]
     dry_run: bool
     table_messages: bool        # a day's table in the chat on news; off: the krem mini app shows it to the owner
     # Where things are
@@ -133,6 +134,14 @@ def _params(env: Mapping[str, str]) -> Params:
     return params
 
 
+def _alert_chats(env: Mapping[str, str]) -> tuple[str, ...]:
+    """Who hears that the battery will not last: the owner, and DEYE_RESERVE_ALERT_CHAT_IDS or else the krem
+    chats of dtek-service (KREM_CHAT_IDS, the same .env)."""
+    others = _get(env, "DEYE_RESERVE_ALERT_CHAT_IDS") or _get(env, "KREM_CHAT_IDS") or ""
+    chats = [_require(env, "DEYE_RESERVE_CHAT_ID")] + [c.strip() for c in others.split(",") if c.strip()]
+    return tuple(dict.fromkeys(chats))
+
+
 def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
     env = os.environ if env is None else env
     password = _require(env, "DEYE_PASSWORD_SHA256").lower()
@@ -149,6 +158,7 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
         base_url=_get(env, "DEYE_BASE_URL", "https://eu1-developer.deyecloud.com").rstrip("/"),
         bot_token=_require(env, f"BOT_{bot}_TOKEN"),
         chat_id=_require(env, "DEYE_RESERVE_CHAT_ID"),
+        alert_chat_ids=_alert_chats(env),
         dry_run=_bool(env, "DEYE_RESERVE_DRY_RUN", False),
         table_messages=_bool(env, "DEYE_RESERVE_TABLE_MESSAGES", False),
         dtek_url=_get(env, "DEYE_RESERVE_DTEK_URL", "http://127.0.0.1:9998").rstrip("/"),

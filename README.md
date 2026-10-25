@@ -72,9 +72,10 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   whenever it changed, with the reason under it; that is off since 25.10
   (`DEYE_RESERVE_TABLE_MESSAGES=true` brings it back). The chat still gets
   an alarm when a write fails. During an outage the
-  inverter reading is looked at every 3 min, and the owner is warned once
-  when at the present load the battery will not last until the grid is due
-  back. With
+  inverter reading is looked at every 3 min, and every krem chat is warned
+  once when at the present load the battery will not last until the grid
+  is due back (it runs down to the 10% shutdown); from then until the grid
+  is back the krem mini app shows everyone until when it lasts. With
   `DEYE_RESERVE_WRITE=true` each replan writes a changed table straight
   away (`/order/sys/tou/update` with 120 s for the inverter to answer;
   order status 666 means it is written, `/config/tou` is not read back),

@@ -59,8 +59,19 @@ class HttpSources:
         return multi, ensemble
 
 
+class Broadcast:
+    """The same message to several chats, one after the other (the battery alert goes to every krem chat);
+    delivered when any of them took it, so a chat that is gone does not bring it back to the others."""
+
+    def __init__(self, messengers: list):
+        self._messengers = messengers
+
+    async def send(self, text: str) -> bool:
+        return any([await m.send(text) for m in self._messengers])
+
+
 class Telegram:
-    """sendMessage to the owner's chat through the krem bot; a few retries, then the message is dropped."""
+    """sendMessage to one chat through the krem bot; a few retries, then the message is dropped."""
     TRIES = 4
 
     def __init__(self, token: str, chat_id: str, session: aiohttp.ClientSession, dry_run: bool = False):

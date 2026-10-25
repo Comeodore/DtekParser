@@ -1,4 +1,5 @@
-"""Local HTTP: webhooks from dtek-service in; health, the current plan and today's sun out."""
+"""Local HTTP: webhooks from dtek-service in; health, the current plan, today's sun and the battery after a
+warning out."""
 from __future__ import annotations
 
 from aiohttp import web
@@ -31,6 +32,12 @@ def make_app(service: ReserveService) -> web.Application:
             raise web.HTTPNotFound(text="no plan yet")
         return web.json_response(body)
 
+    async def battery(_: web.Request) -> web.Response:
+        body = service.battery_payload()
+        if body is None:
+            raise web.HTTPNotFound(text="no battery warning")
+        return web.json_response(body)
+
     async def sun(_: web.Request) -> web.Response:
         body = service.sun_today()
         if body is None:
@@ -40,6 +47,7 @@ def make_app(service: ReserveService) -> web.Application:
     app = web.Application()
     app.router.add_post("/events/{kind}", event)
     app.router.add_get("/sun", sun)
+    app.router.add_get("/battery", battery)
     app.router.add_get("/health", health)
     app.router.add_get("/plan", plan)
     return app

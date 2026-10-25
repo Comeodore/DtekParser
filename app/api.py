@@ -55,6 +55,20 @@ def scheduled_status(snapshot: Snapshot, now: datetime, lang: str) -> Optional[d
     return {"state": state, "start": " / ".join(dict.fromkeys(starts)), "end": " / ".join(dict.fromkeys(ends))}
 
 
+# deye-reserve looks at the battery every 3 min: an estimate older than this is not the present load's.
+BATTERY_FRESH = timedelta(minutes=10)
+
+
+def battery_until(battery: Optional[dict], inverter: dict, now: datetime) -> Optional[str]:
+    """"HH:MM" the battery runs down to its shutdown at the present load, once deye-reserve warned that it will
+    not last and while the grid is away; None otherwise (the grid back is seen here first)."""
+    if not battery or not battery.get("empty_at") or inverter.get("grid_present") is not False:
+        return None
+    if now - datetime.fromisoformat(battery["at"]) > BATTERY_FRESH:
+        return None
+    return f"{datetime.fromisoformat(battery['empty_at']).astimezone(KYIV_TZ):%H:%M}"
+
+
 def schedule_payload(collector: SourceCollector, now: datetime, inverter: Optional[dict] = None,
                      batteries: Optional[list[dict]] = None) -> dict:
     cfg = collector.config
@@ -153,6 +167,7 @@ def create_app(service: Service) -> FastAPI:
             sun = await service.reserve.sun()
             if sun and sun.get("date") == now.date().isoformat():
                 inverter["pv_forecast_kwh"] = sun.get("p50_kwh")
+            inverter["battery_until"] = battery_until(await service.reserve.battery(), inverter, now)
         payload = schedule_payload(collector, now, inverter, batteries_for(collector.name, now))
         return JSONResponse(payload, headers=NO_CACHE)
 

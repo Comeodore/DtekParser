@@ -18,10 +18,11 @@ for it. With DEYE_RESERVE_TABLE_MESSAGES=true the owner gets that news in the
 chat: the final table, sent once it is in the inverter (a line says so only
 when it is not), the reason under it. Off (the default), the krem mini app
 shows the owner the tables and the last reason (/plan). Either way the owner
-hears about a write that failed and, during an outage, when the battery will
-not last until the grid is due back at the house's present load. The reasons
-behind every decision go to the journal (data/journal.jsonl), for the daily
-review.
+hears about a write that failed, and during an outage every krem chat hears
+when the battery will not last until the grid is due back at the house's
+present load (from then on the mini app shows until when, /battery). The
+reasons behind every decision go to the journal (data/journal.jsonl), for
+the daily review.
 """
 from __future__ import annotations
 
@@ -94,13 +95,14 @@ class ReserveService:
     CHARGE_REPORT_MIN = 20          # the first charge with the new settings is told after this long
 
     def __init__(self, config: Config, sources: Sources, deye: Deye, messenger: Messenger,
-                 clock=now_kyiv, sleep=asyncio.sleep):
+                 clock=now_kyiv, sleep=asyncio.sleep, alerts: Optional[Messenger] = None):
         self.cfg = config
         self.p = config.params
         self.planner = Planner(config.params)
         self.sources = sources
         self.deye = deye
-        self.messenger = messenger
+        self.messenger = messenger              # the owner's chat
+        self.alerts = alerts or messenger       # every krem chat: the battery will not last
         self._clock = clock
         self._sleep = sleep
         self._state_path = config.data_dir / "state.json"
@@ -138,6 +140,10 @@ class ReserveService:
         self._readings: list[tuple[datetime, float, float]] = []    # (at, load W, PV W)
         self._charge_run: list[list] = []                             # the grid charge under way, as samples
         self._off_since: Optional[datetime] = None
+        # After the battery alert of an outage, until the grid is back: how long the battery lasts at the
+        # present load, for the krem mini app (/battery).
+        self._warned = False
+        self.battery: Optional[dict] = None
 
     # ---- caches ----
 
@@ -572,9 +578,10 @@ class ReserveService:
     # ---- the battery during an outage ----
 
     async def watch(self, now: datetime) -> None:
-        """A reading every few minutes; without the grid, a warning when at the present load the battery
-        will not last until the grid is due back (the scheduled end plus a margin, or a while when the
-        outage is not in the schedule). Once per outage, and again if DTEK moves its end."""
+        """A reading every few minutes; without the grid, a warning to every krem chat when at the present load
+        the battery will not last until the grid is due back (the scheduled end plus a margin, or a while when
+        the outage is not in the schedule). Once per outage, and again if DTEK moves its end. From the warning
+        until the grid is back, `battery` says when it runs down to the shutdown SOC at the present load."""
         self._next_watch = now + timedelta(seconds=self.cfg.watch_s)
         try:
             reading = (await self.sources.inverter()).get("reading")
@@ -591,12 +598,13 @@ class ReserveService:
         self._readings = [r for r in self._readings if r[0] >= now - self.WATCH_WINDOW]
         await self._watch_charge(reading, at, now)
         if reading.get("grid_present") is not False:
-            self._off_since = None
+            self._off_since, self._warned, self.battery = None, False, None
             return
         self._off_since = self._off_since or at
         net = sum(max(0.0, load - pv) for _, load, pv in self._readings) / len(self._readings)
         soc = float(reading["soc"])
         if net < 50:
+            self.battery = None         # next to nothing drawn: no time to speak of
             return
         p = self.p
         hours = max(0.0, soc - p.shutdown_soc) / 100 * p.capacity_kwh * p.efficiency / (net / 1000)
@@ -608,14 +616,17 @@ class ReserveService:
         else:
             back, key = None, f"off/{self._off_since.isoformat()}"
             until = now + timedelta(hours=self.cfg.alert_unscheduled_h)
-        if empty >= until or key in self.state.alerts:
-            return
-        if await self.messenger.send(render_battery(soc, net, empty, back)):
+        if empty < until and key not in self.state.alerts and \
+                await self.alerts.send(render_battery(soc, net, empty, back)):
             self.state.alerts = (self.state.alerts + [key])[-20:]
             self.journal.add("alert", now, soc=soc, load_w=round(net), empty=empty.isoformat(),
                              back=back.isoformat() if back else None, key=key)
             logger.warning(f"battery alert: {soc:.0f}% at {net:.0f} W lasts until {local(empty):%H:%M}")
             self._save()
+        self._warned = self._warned or key in self.state.alerts
+        if self._warned:
+            self.battery = {"at": at.isoformat(), "soc": soc, "load_w": round(net), "empty_at": empty.isoformat(),
+                            "back_at": back.isoformat() if back else None}
 
     def charge_kw(self) -> float:
         """The grid charge rate to plan with: the median the charger reached over the last week (below 90%,
@@ -765,6 +776,11 @@ class ReserveService:
             waited += self.ORDER_POLL_S
 
     # ---- status ----
+
+    def battery_payload(self) -> Optional[dict]:
+        """After the battery alert, while the grid is away: when the battery reaches the shutdown SOC at the
+        present load, for the krem mini app."""
+        return self.battery
 
     def sun_today(self) -> Optional[dict]:
         """Today's PV forecast in kWh, for the krem mini app (dtek-service shows it next to the panels' output)."""

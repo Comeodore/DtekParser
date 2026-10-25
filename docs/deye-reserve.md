@@ -206,12 +206,20 @@ the whole import, house and charger, under 4.5 kW.
   Expect about 1–3 extra messages a day, the morning night change among
   them.
 - **The battery during an outage** ("🪫 Батареї може не вистачити до
-  світла"): every 3 min the reading is looked at; without the grid, if at
-  the house's load (mean of the last 30 min, minus PV) the battery reaches
-  20% before the scheduled end + 30 min (an outage not in the schedule:
-  2 h from now), the owner hears it once per outage, and again if DTEK
-  moves the end. On 07–18.10 this fires exactly once: 16.10 09:05, 30% at
-  887 W, empty ~10:10, outage until 11:30.
+  ввімкнення світла", no full stops; to every krem chat since 25.10:
+  the owner's and `KREM_CHAT_IDS`, or `DEYE_RESERVE_ALERT_CHAT_IDS`):
+  every 3 min the reading is looked at; without the grid, if at the
+  house's load (mean of the last 30 min, minus PV) the battery reaches
+  the 10% shutdown (20% until 24.10) before the scheduled end + 30 min
+  (an outage not in the schedule: 2 h from now), the chats hear it once
+  per outage, and again if DTEK moves the end. It is not tied to a SOC:
+  the day's 45% floor only holds while the grid is there, in an outage the
+  battery runs on down to 10%. On 07–18.10 this fires exactly once: 16.10
+  09:05, 30% at 887 W, empty ~10:10, outage until 11:30. From the alert
+  until the grid is back, deye-reserve's `/battery` gives the time it
+  lasts at the present load (each 3-min look), and the krem mini app shows
+  it to everyone in the diagram: "🪫 При поточному споживанні заряду
+  вистачить до 10:10".
 
 ## When it replans
 

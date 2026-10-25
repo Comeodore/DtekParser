@@ -219,12 +219,13 @@ def night_line(ctx: dict, day: date) -> str:
 
 
 def render_battery(soc: float, load_w: float, empty_at: datetime, back_at: Optional[datetime]) -> str:
-    """The battery will not last until the grid is due back at the house's present load."""
-    lines = ["🪫 <b>Батареї може не вистачити до світла</b>",
-             f"Заряд {soc:.0f}%, навантаження ~{load_w:.0f} Вт: вистачить приблизно до {local(empty_at):%H:%M}."]
-    lines.append(f"За графіком світло о {local(back_at):%H:%M}." if back_at is not None
-                 else "Світла немає поза графіком.")
-    lines.append("Варто зменшити навантаження.")
+    """The battery will not last until the grid is due back at the house's present load. For every krem chat;
+    no full stops at the ends of lines."""
+    lines = ["🪫 <b>Батареї може не вистачити до ввімкнення світла</b>",
+             f"Заряд {soc:.0f}%, навантаження ~{load_w:.0f} Вт: вистачить приблизно до {local(empty_at):%H:%M}"]
+    lines.append(f"За графіком світло з'явиться о {local(back_at):%H:%M}" if back_at is not None
+                 else "Світла немає поза графіком")
+    lines.append("Варто зменшити навантаження")
     return "\n".join(lines)
 
 

@@ -10,7 +10,7 @@ from deye_reserve.config import ConfigError, load_config
 from deye_reserve.deye import parse_tou, tou_request
 from deye_reserve.inputs import Forecast, InputError, changed_days, combine_forecast, parse_schedule, rank_models
 from deye_reserve.messages import change_reasons, night_line, range_line, render_charge
-from deye_reserve.net import HttpSources
+from deye_reserve.net import Broadcast, HttpSources
 from deye_reserve.planner import Params, Slot, safe_table
 from deye_reserve.review import actual, decisions, sun_lines, with_mix
 from deye_reserve.service import ReserveService
@@ -665,8 +665,9 @@ async def test_a_battery_that_will_not_last_is_reported_once(make):
     service.sources.reading = {"soc": 20.0, "grid_present": False, "load_w": 950.0, "pv_w": 50.0}
     await service.watch(clock["now"])
     text = service.messenger.texts[-1]
-    assert text.startswith("🪫 <b>Батареї може не вистачити до світла</b>\nЗаряд 20%, навантаження ~900 Вт")
-    assert "вистачить приблизно до 16:1" in text and "За графіком світло о 17:00." in text
+    assert text.startswith("🪫 <b>Батареї може не вистачити до ввімкнення світла</b>\nЗаряд 20%, навантаження ~900 Вт")
+    assert "вистачить приблизно до 16:1" in text and "\nЗа графіком світло з'явиться о 17:00\n" in text
+    assert not any(line.endswith(".") for line in text.splitlines())
     await service.watch(T(17, 15, 13))
     assert len(service.messenger.texts) == 1                          # once per outage
     assert [r["kind"] for r in service.journal.read()] == ["alert"]
@@ -681,7 +682,7 @@ async def test_an_outage_outside_the_schedule_is_watched_too(make):
     service, clock = make(now=T(17, 19))
     service.sources.reading = {"soc": 20.0, "grid_present": False, "load_w": 600.0, "pv_w": 0.0}
     await service.watch(clock["now"])
-    assert service.messenger.texts[-1].endswith("Світла немає поза графіком.\nВарто зменшити навантаження.")
+    assert service.messenger.texts[-1].endswith("Світла немає поза графіком\nВарто зменшити навантаження")
     service.sources.reading = {**service.sources.reading, "grid_present": True}
     await service.watch(T(17, 19, 3))
     assert service._off_since is None and len(service.messenger.texts) == 1
@@ -963,3 +964,52 @@ async def test_table_news_is_logged_with_messages_on_too(make, caplog):
     assert tomorrow.startswith(f"table for 18.10: {range_line(report.tables[date(2026, 10, 18)])}; "
                                "takes over at 16:00; Причина: ")
     assert today.endswith("; chat: sent") and tomorrow.endswith("; chat: sent")
+
+
+
+# ---- the battery alert goes to every krem chat, and the mini app shows the time left after it ----
+
+def test_the_battery_alert_goes_to_the_owner_and_every_krem_chat():
+    assert load_config(ENV).alert_chat_ids == ("370921204",)
+    krem = {**ENV, "KREM_CHAT_IDS": "222, 370921204,333"}
+    assert load_config(krem).alert_chat_ids == ("370921204", "222", "333")
+    assert load_config({**krem, "DEYE_RESERVE_ALERT_CHAT_IDS": "444"}).alert_chat_ids == ("370921204", "444")
+
+
+async def test_a_broadcast_is_delivered_when_any_chat_took_it():
+    class Refusing(Messenger):
+        async def send(self, text):
+            self.texts.append(text)
+            return False
+    took, gone = Messenger(), Refusing()
+    assert await Broadcast([gone, took]).send("🪫") and took.texts == gone.texts == ["🪫"]
+    assert not await Broadcast([Refusing()]).send("🪫")
+
+
+async def test_after_the_alert_the_time_left_is_kept_until_the_grid_is_back(make):
+    service, clock = make(now=T(17, 15, 10))
+    service.alerts = everyone = Messenger()
+    service.sources.reading = {"soc": 60.0, "grid_present": False, "load_w": 300.0, "pv_w": 0.0}
+    await service.watch(clock["now"])
+    assert everyone.texts == [] and service.battery_payload() is None        # it lasts: nothing to show
+    # The house draws more: the alert goes to every krem chat, not the owner's chat alone.
+    service.sources.reading = {"soc": 20.0, "grid_present": False, "load_w": 950.0, "pv_w": 50.0}
+    service._readings = []
+    clock["now"] = T(17, 15, 13)
+    await service.watch(clock["now"])
+    assert len(everyone.texts) == 1 and service.messenger.texts == []
+    left = service.battery_payload()
+    # 20% down to the 10% shutdown: 1.02 kWh x 0.95 at 900 W is about 65 min.
+    assert (left["soc"], left["load_w"], left["back_at"]) == (20.0, 900, T(17, 17).isoformat())
+    assert datetime.fromisoformat(left["empty_at"]) == T(17, 15, 12) + timedelta(hours=0.1 * 10.24 * 0.95 / 0.9)
+    # Later it follows the load; the grid back clears it.
+    service.sources.reading = {**service.sources.reading, "soc": 18.0}
+    await service.watch(T(17, 15, 16))
+    assert service.battery_payload()["soc"] == 18.0 and len(everyone.texts) == 1
+    service.sources.reading = {**service.sources.reading, "grid_present": True}
+    await service.watch(T(17, 15, 19))
+    assert service.battery_payload() is None
+    async with TestClient(TestServer(make_app(service))) as http:
+        assert (await http.get("/battery")).status == 404
+        service.battery = {"at": "x"}
+        assert (await (await http.get("/battery")).json()) == {"at": "x"}

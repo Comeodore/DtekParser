@@ -11,7 +11,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from fastapi.testclient import TestClient
 
-from app.api import create_app
+from app.api import battery_until, create_app
 from app.collector import SourceCollector
 from app.config import ConfigError, load_settings
 from app.inverter.deye import InverterMonitor, parse_device_latest
@@ -324,3 +324,23 @@ def test_init_data_is_checked_by_telegrams_rule():
     assert webapp_user(init_data(user="not json"), "2:b", now) is None
     assert webapp_user("hash=abc", "2:b", now) is None and webapp_user("%%%", "2:b", now) is None
     assert webapp_user(init_data(), "", now) is None
+
+
+
+def test_the_krem_mini_app_shows_the_time_left_after_a_battery_warning(monkeypatch):
+    service = Service(load_settings({**BASE_ENV, **DEYE_ENV, "DEYE_RESERVE_URL": "http://127.0.0.1:9997"}),
+                      store=MemoryStore(), gateway=object())
+    service.inverter.latest = replace(parse_device_latest(device(), 100), grid_present=False)
+    monkeypatch.setattr("app.api.now_kyiv", lambda: kyiv(2026, 10, 16, 17, 25))
+    warning = {"at": "2026-10-16T17:23:00+03:00", "soc": 20.0, "load_w": 900,
+               "empty_at": "2026-10-16T18:28:00+03:00", "back_at": None}
+
+    async def battery():
+        return warning
+    service.reserve.battery = battery
+    http = TestClient(create_app(service))
+    assert http.get("/api/v1/schedule?source=krem").json()["inverter"]["battery_until"] == "18:28"
+    assert battery_until({**warning, "at": "2026-10-16T17:10:00+03:00"}, {"grid_present": False},
+                         kyiv(2026, 10, 16, 17, 25)) is None                    # not the present load any more
+    assert battery_until(warning, {"grid_present": True}, kyiv(2026, 10, 16, 17, 25)) is None   # the grid is back
+    assert battery_until(None, {"grid_present": False}, kyiv(2026, 10, 16, 17, 25)) is None

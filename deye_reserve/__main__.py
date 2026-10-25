@@ -9,7 +9,7 @@ from aiohttp import web
 
 from deye_reserve.config import ConfigError, load_config
 from deye_reserve.deye import DeyeClient
-from deye_reserve.net import HttpSources, Telegram
+from deye_reserve.net import Broadcast, HttpSources, Telegram
 from deye_reserve.service import ReserveService
 from deye_reserve.web import make_app
 
@@ -25,14 +25,17 @@ async def serve() -> None:
     async with aiohttp.ClientSession(timeout=timeout) as session:
         deye = DeyeClient(config.base_url, config.app_id, config.app_secret, config.email, config.password_sha256,
                           session, config.data_dir / "token.json")
-        service = ReserveService(config, HttpSources(config, session), deye,
-                                 Telegram(config.bot_token, config.chat_id, session, config.dry_run))
+        def telegram(chat: str) -> Telegram:
+            return Telegram(config.bot_token, chat, session, config.dry_run)
+        service = ReserveService(config, HttpSources(config, session), deye, telegram(config.chat_id),
+                                 alerts=Broadcast([telegram(c) for c in config.alert_chat_ids]))
         runner = web.AppRunner(make_app(service), access_log=None)
         await runner.setup()
         await web.TCPSite(runner, config.host, config.port).start()
         logger.info(f"deye-reserve on {config.host}:{config.port}: group {config.group}, "
                     f"write {'ON' if config.write else 'off'}, sun {'/'.join(config.sun_models)}, "
-                    f"dry_run={config.dry_run}")
+                    f"table messages {'ON' if config.table_messages else 'off'}, "
+                    f"battery alert to {len(config.alert_chat_ids)} chats, dry_run={config.dry_run}")
         main = asyncio.current_task()
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
