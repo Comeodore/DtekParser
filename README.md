@@ -27,7 +27,11 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   timed to land just after the next reading reaches the cloud (`/health`
   shows the cadence, the lag and the calls per reading). Settings are
   `DEYE_*`; `tools/deye_probe.py` lists the stations and measures the
-  refresh rate.
+  refresh rate. `GET /metrics` gives the last reading to VictoriaMetrics
+  (`deye_*`, each sample stamped with the logger's collection time, so a
+  scrape with `honor_timestamps` stores one point per upload at its real
+  time); it answers on the LAN only, not through the Cloudflare tunnel.
+  Grafana's "Krem · Deye inverter" dashboard draws them.
   The krem badge itself follows the schedule, as dtek-krem posts no outage
   notices.
 - **Batteries (kem).** The kem mini app shows three batteries: Home (Victron,

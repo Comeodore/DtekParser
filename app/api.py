@@ -10,12 +10,13 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from app.collector import SourceCollector
 from app.dtek.legacy import legacy_row
 from app.dtek.models import Snapshot
 from app.engine.periods import continues_into, current_period
+from app.inverter.metrics import exposition
 from app.reserve_hook import charge_table
 from app.service import Service
 from app.timeutil import KYIV_TZ, MINUTES_IN_DAY, format_moment, minute_of_day, now_kyiv
@@ -215,6 +216,13 @@ def create_app(service: Service) -> FastAPI:
             "last_error": monitor.last_error or None,
             "grid": {"status": grid.status.name, "since": grid.since.isoformat()} if grid else None,
         }, headers=NO_CACHE)
+
+    @app.get("/metrics")
+    async def metrics(request: Request):
+        """The inverter's last reading for VictoriaMetrics, on the LAN only: not through the Cloudflare tunnel."""
+        if request.headers.get("cf-connecting-ip"):
+            raise HTTPException(404, "Not Found")
+        return PlainTextResponse(exposition(service.inverter), media_type="text/plain; version=0.0.4")
 
     @app.get("/api/v1/health")
     async def health():

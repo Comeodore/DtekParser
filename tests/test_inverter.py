@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import date, timedelta
+from typing import Optional
 
 import pytest
 from fastapi.testclient import TestClient
@@ -239,3 +240,39 @@ def test_only_the_inverters_source_gets_it(monkeypatch):
     assert [(b["name"], b["soc"], b["battery_w"]) for b in kem["batteries"]] == [("home", 86, -2767), ("water", 99, 82)]
     health = http.get("/api/v1/health").json()["inverter"]
     assert health["source"] == "krem" and health["cadence_s"] == 72 and health["calls_per_reading"] is None
+
+
+def scrape(http: TestClient) -> dict[str, tuple[float, Optional[int]]]:
+    """/metrics as {series: (value, timestamp in ms or None)}."""
+    samples = {}
+    for line in http.get("/metrics").text.splitlines():
+        if not line.startswith("#"):
+            series, value, *stamp = line.split(" ")
+            samples[series] = (float(value), int(stamp[0]) if stamp else None)
+    return samples
+
+
+def test_metrics_are_stamped_with_the_loggers_time():
+    service = Service(load_settings({**BASE_ENV, **DEYE_ENV}), store=MemoryStore(), gateway=object())
+    http = TestClient(create_app(service))
+    assert scrape(http) == {}
+    reading = parse_device_latest(device(DCPowerPV1="1200", DCPowerPV2="900", SOC="--"), 100)
+    service.inverter.latest = reading
+    ms = int(kyiv(2026, 10, 16, 17, 22, 3).timestamp() * 1000)
+    samples = scrape(http)
+    assert samples['deye_battery_power_watts{source="krem"}'] == (2613, ms)
+    assert samples['deye_grid_power_watts{source="krem"}'] == (2861, ms)
+    assert samples['deye_grid_present{source="krem"}'] == (1, ms)
+    assert samples['deye_load_today_kwh{source="krem"}'] == (7.4, ms)
+    assert samples['deye_battery_discharged_today_kwh{source="krem"}'] == (4.2, ms)
+    assert samples['deye_pv_string_power_watts{source="krem",string="2"}'] == (900, ms)
+    assert samples['deye_pv_string_voltage_volts{source="krem",string="1"}'] == (110.4, ms)
+    assert samples['deye_reading_timestamp_seconds{source="krem"}'] == (ms / 1000, None)
+    # Deye's "--" is no point at all, and the grid is split by tariff only once 07:00 was seen.
+    assert not [s for s in samples if s.startswith(("deye_battery_soc", "deye_grid_tariff"))]
+    service.inverter.grid_day.follow(replace(reading, at=kyiv(2026, 10, 16, 6, 59), grid_today_kwh=2.5),
+                                     replace(reading, at=kyiv(2026, 10, 16, 7, 0, 12), grid_today_kwh=2.6))
+    samples = scrape(http)
+    assert samples['deye_grid_tariff_today_kwh{source="krem",tariff="night"}'] == (2.5, ms)
+    assert samples['deye_grid_tariff_today_kwh{source="krem",tariff="day"}'] == (5.5, ms)
+    assert http.get("/metrics", headers={"cf-connecting-ip": "203.0.113.7"}).status_code == 404

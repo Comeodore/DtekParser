@@ -55,6 +55,13 @@ class InverterReading:
     grid_present: bool
     pv_today_kwh: Optional[float] = None    # the panels' output since the inverter's midnight
     grid_today_kwh: Optional[float] = None  # drawn from the grid since the inverter's midnight
+    # The rest is for /metrics only, not the mini app.
+    load_today_kwh: Optional[float] = None
+    charged_today_kwh: Optional[float] = None       # into the battery since the inverter's midnight
+    discharged_today_kwh: Optional[float] = None
+    battery_v: Optional[float] = None
+    grid_hz: Optional[float] = None
+    pv_strings: tuple[tuple[Optional[float], Optional[float]], ...] = ()     # (W, V) per PV input
 
     def to_dict(self, now: datetime, stale_after_s: float) -> dict:
         return {
@@ -91,6 +98,11 @@ def parse_device_latest(item: dict, min_grid_voltage: float) -> InverterReading:
         raise DeyeError(f"inverter {item.get('deviceSn')} has no collectionTime")
     battery = num("BatteryPower")
     grid_v = num("GridVoltageL1L2", "GridVoltageL1")
+    strings = []
+    for n in range(1, 9):
+        if f"DCPowerPV{n}" not in values and f"DCVoltagePV{n}" not in values:
+            break
+        strings.append((num(f"DCPowerPV{n}"), num(f"DCVoltagePV{n}")))
     return InverterReading(
         at=datetime.fromtimestamp(int(collected), KYIV_TZ),
         soc=num("SOC"),
@@ -103,6 +115,12 @@ def parse_device_latest(item: dict, min_grid_voltage: float) -> InverterReading:
         grid_present=grid_v is not None and grid_v >= min_grid_voltage,
         pv_today_kwh=num("PVDailyPowerGenerationActive"),
         grid_today_kwh=num("DailyEnergyPurchased"),
+        load_today_kwh=num("DailyConsumption"),
+        charged_today_kwh=num("DailyChargingEnergy"),
+        discharged_today_kwh=num("DailyDischargingEnergy"),
+        battery_v=num("BatteryVoltage"),
+        grid_hz=num("GridFrequency"),
+        pv_strings=tuple(strings),
     )
 
 
