@@ -151,12 +151,14 @@
 
         .status-row.hidden { display: none; }
 
-        /* The power really there, by the source's own sensor, as the headline; what DTEK expects under it,
-           with a tag when the two differ. Without a live sensor the badge above shows DTEK's status alone. */
+        /* The power really there, by the source's own sensor, as the headline; since when and what DTEK expects
+           under it in the same cell, a tag next to it when the two differ. Without a live sensor the badge above
+           shows DTEK's status alone. */
         .power { width: 100%; display: flex; flex-direction: column; align-items: center; text-align: center; }
         .power-now { width: 100%; padding: var(--spacing-md); border-radius: var(--radius-md); }
         .power.on .power-now { background: rgba(48, 209, 88, 0.14); }
         .power.off .power-now { background: rgba(255, 69, 58, 0.14); }
+        .power-head { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px 10px; }
         .power-title {
             display: inline-flex;
             align-items: center;
@@ -168,24 +170,24 @@
         .power-title .status-indicator { width: 10px; height: 10px; }
         .power.on .power-title { color: var(--power-title-on); }
         .power.off .power-title { color: var(--text-off); }
-        .power-since { font-size: 13px; color: var(--text-secondary); margin-top: 2px; font-variant-numeric: tabular-nums; }
-        .power-for { font-weight: 600; color: var(--text-primary); }
-        .power-expected {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
-            align-items: center;
-            gap: 6px 8px;
-            margin-top: var(--spacing-md);
-            font-size: 14px;
-            line-height: 1.35;
+        .power-since {
+            font-size: 13px;
+            line-height: 1.4;
             color: var(--text-secondary);
+            margin-top: 4px;
             font-variant-numeric: tabular-nums;
+            text-wrap: balance;
         }
-        .power-expected.differs { color: var(--text-primary); }
-        .power-tag { padding: 2px 8px; border-radius: 8px; font-size: 12px; font-weight: 600; white-space: nowrap; }
-        .power.on .power-tag { background: rgba(48, 209, 88, 0.16); color: var(--power-title-on); }
-        .power.off .power-tag { background: rgba(255, 69, 58, 0.16); color: var(--text-off); }
+        .power-tag {
+            padding: 1px 8px;
+            border: 1px solid currentColor;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .power.on .power-tag { color: var(--power-title-on); }
+        .power.off .power-tag { color: var(--text-off); }
 
         .info-list {
             display: flex;
@@ -542,7 +544,6 @@
             .status-row { padding-bottom: var(--spacing-sm); }
             .power-now { padding: var(--spacing-sm); }
             .power-title { font-size: 22px; }
-            .power-expected { margin-top: var(--spacing-sm); }
             .info-row { padding: 7px 0; }
             .inverter { padding: var(--spacing-sm) 8px 8px; }
             .inverter-footer { margin-top: var(--spacing-md); font-size: 12px; }
@@ -562,12 +563,11 @@
                 </div>
                 <div class="power hidden" id="power">
                     <div class="power-now">
-                        <div class="power-title"><span class="status-indicator"></span><span id="powerTitle"></span></div>
+                        <div class="power-head">
+                            <div class="power-title"><span class="status-indicator"></span><span id="powerTitle"></span></div>
+                            <span class="power-tag hidden" id="powerTag"></span>
+                        </div>
                         <div class="power-since" id="powerSince"></div>
-                    </div>
-                    <div class="power-expected hidden" id="powerExpected">
-                        <span id="powerExpectedText"></span>
-                        <span class="power-tag hidden" id="powerTag"></span>
                     </div>
                 </div>
             </div>
@@ -682,12 +682,12 @@
                 powerIsOn: 'Power is on',
                 powerIsOff: 'No power',
                 since: 'since',
-                minutesShort: 'm',
                 expectedSchedule: 'Scheduled outage',
                 expectedMaybe: 'Possible scheduled outage',
                 expectedDtek: 'DTEK: outage',
                 until: 'until',
                 dueBack: 'Due back by schedule at',
+                asScheduled: 'As scheduled',
                 backEarly: 'back early',
                 notOffYet: 'not off yet',
                 runningLate: 'running late',
@@ -756,12 +756,12 @@
                 powerIsOn: 'Світло є',
                 powerIsOff: 'Світла немає',
                 since: 'з',
-                minutesShort: 'хв',
                 expectedSchedule: 'За графіком — відключення',
                 expectedMaybe: 'За графіком — можливе відключення',
                 expectedDtek: 'ДТЕК: відключення',
                 until: 'до',
                 dueBack: 'За графіком світло мало бути з',
+                asScheduled: 'За графіком',
                 backEarly: 'увімкнули раніше',
                 notOffYet: 'ще не вимкнули',
                 runningLate: 'затримується',
@@ -956,12 +956,13 @@
             early: 'backEarly', not_yet: 'notOffYet', late: 'runningLate', unscheduled: 'unscheduled', differs: 'notAsScheduled'
         };
 
-        // DTEK's side under the headline: "Scheduled outage until 12:30", "Power on by schedule", or for an
-        // outage running past its end "Due back by schedule at 12:30".
+        // DTEK's side in the headline: "Scheduled outage until 12:30", "As scheduled" for power on as it should be,
+        // "Power on by schedule" against an outage, or for one running past its end "Due back by schedule at 12:30".
         const expectedText = power => {
             const expected = power.expected;
             if (expected.state === 'on') {
-                return power.verdict === 'late' && power.due ? `${t('dueBack')} ${power.due}` : t('schedulePowerOn');
+                if (power.verdict === 'late' && power.due) return `${t('dueBack')} ${power.due}`;
+                return t(power.verdict === 'agree' ? 'asScheduled' : 'schedulePowerOn');
             }
             const what = t(expected.state === 'maybe' ? 'expectedMaybe' : EXPECTED_OFF[expected.kind] || 'expectedDtek');
             return expected.until ? `${what} ${t('until')} ${expected.until}` : what;
@@ -971,23 +972,20 @@
         const renderPower = power => {
             $('power').className = `power ${power.state}`;
             $('powerTitle').textContent = t(power.state === 'on' ? 'powerIsOn' : 'powerIsOff');
-            // "Since 16:46 · 1h 12m"; the building's inverters give no time, and the line goes.
-            const sinceEl = $('powerSince');
-            sinceEl.classList.toggle('hidden', !power.since);
-            const since = t('since');
-            sinceEl.textContent = power.since ? `${since.charAt(0).toUpperCase()}${since.slice(1)} ${power.since}` : '';
-            if (power.minutes >= 1) {
-                sinceEl.append(' · ', el('span', 'power-for',
-                    power.minutes < 60 ? `${power.minutes}${t('minutesShort')}` : formatDuration(power.minutes)));
-            }
-
-            $('powerExpected').classList.toggle('hidden', !power.expected);
-            if (!power.expected) return;
-            const tag = VERDICT_TAG[power.verdict];
-            $('powerExpected').classList.toggle('differs', !!tag);
-            $('powerExpectedText').textContent = expectedText(power);
+            const tag = power.expected && VERDICT_TAG[power.verdict];
             $('powerTag').classList.toggle('hidden', !tag);
             $('powerTag').textContent = tag ? t(tag) : '';
+
+            // "Since 16:46 · scheduled outage until 20:00": a phrase after the time starts lower case, unless
+            // it starts with a name ("DTEK: outage"). The building's inverters give no time, DTEK's side alone.
+            let expected = power.expected ? expectedText(power) : '';
+            if (power.since && /^.\p{Ll}/u.test(expected)) {
+                expected = expected.charAt(0).toLowerCase() + expected.slice(1);
+            }
+            const since = power.since && `${t('since')} ${power.since}`;
+            const line = [since, expected].filter(Boolean).join(' · ');
+            $('powerSince').classList.toggle('hidden', !line);
+            $('powerSince').textContent = line.charAt(0).toUpperCase() + line.slice(1);
         };
 
         const renderStatus = (status, updated, power) => {

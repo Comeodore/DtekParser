@@ -43,8 +43,7 @@ def test_power_back_before_the_scheduled_end():
     # The screenshot of 28.10 12:22: DTEK still had the outage until 12:30, HA saw the power back at 12:15.
     status = power_status(on(kyiv(2026, 10, 28, 12, 15, 29)), kem_28_10(), kyiv(2026, 10, 28, 12, 22), "en")
     assert status == {
-        "state": "on", "since": "12:15", "since_at": "2026-10-28T12:15:29+02:00", "minutes": 6,
-        "source": "home_assistant",
+        "state": "on", "since": "12:15", "since_at": "2026-10-28T12:15:29+02:00", "source": "home_assistant",
         "expected": {"state": "off", "kind": "schedule", "until": "12:30"},
         "verdict": "early", "due": None,
     }
@@ -113,8 +112,7 @@ def test_without_a_schedule_or_notice_only_the_power_is_known():
     suspended = snapshot([one(date(2026, 10, 1), [12])], outage=emergency(start="11:04 30.09.2026",
                                                                            end="09:00 01.10.2026", suspended=True))
     status = power_status(off(kyiv(2026, 9, 30, 11, 6)), suspended, kyiv(2026, 10, 1, 12), "en")
-    assert (status["since"], status["minutes"]) == ("11:06 30.09", 1494)           # 24 h 54 min
-    assert (status["expected"], status["verdict"]) == (None, None)
+    assert (status["since"], status["expected"], status["verdict"]) == ("11:06 30.09", None, None)
     assert power_status(on(kyiv(2026, 10, 1, 8)), None, kyiv(2026, 10, 1, 12), "en")["expected"] is None
 
 
