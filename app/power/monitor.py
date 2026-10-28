@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Optional
 
 import aiohttp
@@ -18,6 +18,7 @@ from app.config import PowerConfig
 from app.dtek.models import Snapshot
 from app.notify.router import Router
 from app.power.state import PowerState, PowerStatus, next_state, parse_battery, parse_number, parse_voltage
+from app.power.verdict import Actual
 from app.storage.store import Store
 from app.timeutil import KYIV_TZ, now_kyiv
 
@@ -37,6 +38,8 @@ class PowerMonitor:
     # A dead connection is detected by websocket ping/pong, not by silence: while
     # the power is off the voltage stays at 0 and HA has nothing to send.
     PING_INTERVAL_S = 30.0
+    # HA drops the websocket now and then and is back within seconds; the state holds that long meanwhile.
+    LIVE_GRACE = timedelta(minutes=2)
 
     def __init__(
         self,
@@ -59,6 +62,7 @@ class PowerMonitor:
         self.battery_soc: Optional[float] = None
         self.battery_w: Optional[float] = None
         self.connected = False
+        self._lost_at: Optional[datetime] = None
         self._warned_unavailable = False
 
     @property
@@ -68,6 +72,16 @@ class PowerMonitor:
     @property
     def source(self) -> str:
         return self._config.source
+
+    def actual(self, now: datetime) -> Optional[Actual]:
+        """The home's power for the mini app's status; None until HA has said it, while HA is away or while the
+        sensor has no value."""
+        state = self._state
+        if state is None or self._warned_unavailable:
+            return None
+        if not self.connected and (self._lost_at is None or now - self._lost_at > self.LIVE_GRACE):
+            return None
+        return Actual(state.status is PowerStatus.ON, state.since, "home_assistant")
 
     def battery_payload(self) -> Optional[dict]:
         if self.battery_soc is None:
@@ -90,11 +104,16 @@ class PowerMonitor:
                 raise
             except Exception as e:
                 logger.warning(f"Home Assistant connection lost: {type(e).__name__}: {e}")
-            self.connected = False
+            self._disconnected()
             if time.monotonic() - started > 60:
                 delay = self.RECONNECT_MIN_S
             await asyncio.sleep(delay)
             delay = min(delay * 2, self.RECONNECT_MAX_S)
+
+    def _disconnected(self) -> None:
+        if self.connected:
+            self._lost_at = self._clock()
+        self.connected = False
 
     async def _session(self) -> None:
         timeout = aiohttp.ClientTimeout(total=None, connect=20, sock_read=None)

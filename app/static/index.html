@@ -24,6 +24,7 @@
             --power-off: #d06058;
             /* Coloured text and chips; Telegram's light theme overrides some (html.light below). */
             --badge-on: var(--status-on);
+            --power-title-on: var(--status-on);
             --text-on: var(--power-on);
             --text-off: var(--status-off);
             --stat-off: var(--power-off);
@@ -45,6 +46,8 @@
         html.light {
             --text-sun: #c99700;
             --text-night: #5856d6;
+            /* The headline's green is large text on a green tint: the bright one washes out on white. */
+            --power-title-on: #248a3d;
         }
 
         * {
@@ -147,6 +150,41 @@
         }
 
         .status-row.hidden { display: none; }
+
+        /* The power really there, by the source's own sensor, as the headline; what DTEK expects under it,
+           with a tag when the two differ. Without a live sensor the badge above shows DTEK's status alone. */
+        .power { width: 100%; display: flex; flex-direction: column; align-items: center; text-align: center; }
+        .power-now { width: 100%; padding: var(--spacing-md); border-radius: var(--radius-md); }
+        .power.on .power-now { background: rgba(48, 209, 88, 0.14); }
+        .power.off .power-now { background: rgba(255, 69, 58, 0.14); }
+        .power-title {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 26px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+        }
+        .power-title .status-indicator { width: 10px; height: 10px; }
+        .power.on .power-title { color: var(--power-title-on); }
+        .power.off .power-title { color: var(--text-off); }
+        .power-since { font-size: 13px; color: var(--text-secondary); margin-top: 2px; font-variant-numeric: tabular-nums; }
+        .power-expected {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-items: center;
+            gap: 6px 8px;
+            margin-top: var(--spacing-md);
+            font-size: 14px;
+            line-height: 1.35;
+            color: var(--text-secondary);
+            font-variant-numeric: tabular-nums;
+        }
+        .power-expected.differs { color: var(--text-primary); }
+        .power-tag { padding: 2px 8px; border-radius: 8px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+        .power.on .power-tag { background: rgba(48, 209, 88, 0.16); color: var(--power-title-on); }
+        .power.off .power-tag { background: rgba(255, 69, 58, 0.16); color: var(--text-off); }
 
         .info-list {
             display: flex;
@@ -501,6 +539,9 @@
             .card { padding: var(--spacing-md); }
             .status-badge { padding: 6px var(--spacing-md); margin-bottom: 0; }
             .status-row { padding-bottom: var(--spacing-sm); }
+            .power-now { padding: var(--spacing-sm); }
+            .power-title { font-size: 22px; }
+            .power-expected { margin-top: var(--spacing-sm); }
             .info-row { padding: 7px 0; }
             .inverter { padding: var(--spacing-sm) 8px 8px; }
             .inverter-footer { margin-top: var(--spacing-md); font-size: 12px; }
@@ -517,6 +558,16 @@
                 <div class="status-badge" id="statusBadge">
                     <span class="status-indicator"></span>
                     <span id="statusText"></span>
+                </div>
+                <div class="power hidden" id="power">
+                    <div class="power-now">
+                        <div class="power-title"><span class="status-indicator"></span><span id="powerTitle"></span></div>
+                        <div class="power-since" id="powerSince"></div>
+                    </div>
+                    <div class="power-expected hidden" id="powerExpected">
+                        <span id="powerExpectedText"></span>
+                        <span class="power-tag hidden" id="powerTag"></span>
+                    </div>
                 </div>
             </div>
             <div class="info-list">
@@ -627,10 +678,25 @@
                 possibleOutage: 'Possible outage',
                 schedulePowerOn: 'Power on by schedule',
                 powerOn: 'Power on',
+                powerIsOn: 'Power is on',
+                powerIsOff: 'No power',
+                since: 'since',
+                byInverter: 'per the inverter',
+                byBuilding: 'per the building\'s inverters',
+                expectedSchedule: 'Scheduled outage',
+                expectedMaybe: 'Possible scheduled outage',
+                expectedDtek: 'DTEK: outage',
+                until: 'until',
+                dueBack: 'Due back by schedule at',
+                backEarly: 'back early',
+                notOffYet: 'not off yet',
+                runningLate: 'running late',
+                unscheduled: 'unscheduled',
+                notAsScheduled: 'not as scheduled',
                 reason: 'Reason',
                 start: 'Start',
                 restoration: 'Restoration',
-                lastUpdated: 'Last updated',
+                lastUpdated: 'DTEK data as of',
                 today: '📅 Today',
                 tomorrow: '📅 Tomorrow',
                 line: 'Line',
@@ -687,6 +753,21 @@
                 possibleOutage: 'Можливе відключення',
                 schedulePowerOn: 'За графіком світло має бути',
                 powerOn: 'Світло є',
+                powerIsOn: 'Світло є',
+                powerIsOff: 'Світла немає',
+                since: 'з',
+                byInverter: 'за даними інвертора',
+                byBuilding: 'за інверторами будинку',
+                expectedSchedule: 'За графіком — відключення',
+                expectedMaybe: 'За графіком — можливе відключення',
+                expectedDtek: 'ДТЕК: відключення',
+                until: 'до',
+                dueBack: 'За графіком світло мало бути з',
+                backEarly: 'увімкнули раніше',
+                notOffYet: 'ще не вимкнули',
+                runningLate: 'затримується',
+                unscheduled: 'поза графіком',
+                notAsScheduled: 'не за графіком',
                 reason: 'Причина',
                 start: 'Початок',
                 restoration: 'Відновлення',
@@ -869,9 +950,49 @@
             };
         };
 
-        const renderStatus = (status, updated) => {
-            $('statusRow').classList.toggle('hidden', !status);
-            if (status) {
+        const POWER_SOURCE = { home_assistant: 'byInverter', deye_batteries: 'byBuilding' };
+        const EXPECTED_OFF = {
+            schedule: 'expectedSchedule', emergency: 'emergencyOutage', planned: 'plannedOutage', dtek: 'expectedDtek'
+        };
+        const VERDICT_TAG = {
+            early: 'backEarly', not_yet: 'notOffYet', late: 'runningLate', unscheduled: 'unscheduled', differs: 'notAsScheduled'
+        };
+
+        // DTEK's side under the headline: "Scheduled outage until 12:30", "Power on by schedule", or for an
+        // outage running past its end "Due back by schedule at 12:30".
+        const expectedText = power => {
+            const expected = power.expected;
+            if (expected.state === 'on') {
+                return power.verdict === 'late' && power.due ? `${t('dueBack')} ${power.due}` : t('schedulePowerOn');
+            }
+            const what = t(expected.state === 'maybe' ? 'expectedMaybe' : EXPECTED_OFF[expected.kind] || 'expectedDtek');
+            return expected.until ? `${what} ${t('until')} ${expected.until}` : what;
+        };
+
+        // data.power: the server's view of the source's own sensor against DTEK's notice or schedule.
+        const renderPower = power => {
+            $('power').className = `power ${power.state}`;
+            $('powerTitle').textContent = t(power.state === 'on' ? 'powerIsOn' : 'powerIsOff');
+            const since = [power.since && `${t('since')} ${power.since}`, t(POWER_SOURCE[power.source] || 'byInverter')]
+                .filter(Boolean).join(' · ');
+            $('powerSince').textContent = since.charAt(0).toUpperCase() + since.slice(1);
+
+            $('powerExpected').classList.toggle('hidden', !power.expected);
+            if (!power.expected) return;
+            const tag = VERDICT_TAG[power.verdict];
+            $('powerExpected').classList.toggle('differs', !!tag);
+            $('powerExpectedText').textContent = expectedText(power);
+            $('powerTag').classList.toggle('hidden', !tag);
+            $('powerTag').textContent = tag ? t(tag) : '';
+        };
+
+        const renderStatus = (status, updated, power) => {
+            $('statusRow').classList.toggle('hidden', !status && !power);
+            $('statusBadge').classList.toggle('hidden', !!power);
+            $('power').classList.toggle('hidden', !power);
+            if (power) {
+                renderPower(power);
+            } else if (status) {
                 $('statusBadge').className = `status-badge ${status.badge}`;
                 $('statusText').textContent = t(status.label);
             }
@@ -1104,7 +1225,7 @@
                 document.documentElement.lang = state.lang;
                 updateLabels();
 
-                renderStatus(currentStatus(data), data.outage_updated);
+                renderStatus(currentStatus(data), data.outage_updated, data.power);
                 renderNotices(data);
                 renderInverter(data.inverter);
                 renderBatteries(data.batteries || []);

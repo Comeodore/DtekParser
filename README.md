@@ -93,6 +93,15 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   `GET 127.0.0.1:9997/plan` shows the current plan, `/health` the loop.
 - **Mini app and API.** Each source's port serves its Telegram mini app and
   `/api/v1/*`: kem on 9999, krem on 9998.
+- **Real power first, DTEK second (kem).** The kem mini app's headline is
+  the power really there: the Home Assistant sensor (kept through a
+  websocket drop of up to 2 min), else the building's Deye inverters when
+  they all agree. Under it comes what DTEK expects: its notice while in
+  force, else the schedule, with a tag when the two differ (back early, not
+  off yet, running late, unscheduled). `power` in `/api/v1/schedule`
+  carries it (`app/power/verdict.py`); without a live sensor it is null and
+  the page shows DTEK's badge alone, as before. krem keeps its badge: its
+  diagram already shows the grid.
 - **Wake-on-LAN.** `POST /api/v1/wol` is kept for HA's
   `rest_command.wake_pc`.
 

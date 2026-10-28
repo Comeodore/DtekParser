@@ -26,6 +26,7 @@ from app.dtek.models import Snapshot
 from app.inverter.grid_day import GridDay
 from app.notify.router import Router
 from app.power.state import PowerState, PowerStatus, PowerTransition, next_state
+from app.power.verdict import Actual
 from app.storage.store import Store
 from app.timeutil import KYIV_TZ, now_kyiv
 
@@ -390,6 +391,14 @@ class InverterMonitor:
         # None, None when a tariff boundary of the day was missed: the mini app shows the total alone.
         body["grid_night_kwh"], body["grid_day_kwh"] = self.grid_day.split(self.latest) or (None, None)
         return body
+
+    def batteries_actual(self, now: datetime) -> Optional[Actual]:
+        """The building's grid by DEYE_BATTERIES' inverters, when every fresh one agrees; None otherwise. They keep
+        no grid history, so there is no since."""
+        fresh = {r.grid_present for r in self.batteries.values() if (now - r.at).total_seconds() <= self.STALE_S}
+        if len(fresh) != 1:
+            return None
+        return Actual(fresh.pop(), None, "deye_batteries")
 
     def batteries_payload(self, now: datetime) -> list[dict]:
         """DEYE_BATTERIES in their configured order, for the batteries row of their source's mini app."""

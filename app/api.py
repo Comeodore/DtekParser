@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -15,11 +15,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from app.collector import SourceCollector
 from app.dtek.legacy import legacy_row
 from app.dtek.models import Snapshot
-from app.engine.periods import continues_into, current_period
 from app.inverter.metrics import exposition
+from app.power.verdict import Actual, current_windows, power_status, schedule_windows
 from app.reserve_hook import charge_table
 from app.service import Service
-from app.timeutil import KYIV_TZ, MINUTES_IN_DAY, format_moment, minute_of_day, now_kyiv
+from app.timeutil import KYIV_TZ, format_moment, now_kyiv
 from app.webapp_auth import webapp_user
 from app.wol import send_magic_packet
 
@@ -35,24 +35,14 @@ def scheduled_status(snapshot: Snapshot, now: datetime, lang: str) -> Optional[d
 
     "maybe" is a house fed by several lines with only some of them off.
     """
-    today = now.astimezone(KYIV_TZ).date()
-    day = snapshot.day(today)
-    if snapshot.schedules_suspended or day is None or not day.lines:
+    lines = schedule_windows(snapshot, now)
+    if lines is None:
         return None
-    minute = minute_of_day(now)
-    midnight = datetime.combine(today, time(), KYIV_TZ)
-    tomorrow = snapshot.day(today + timedelta(days=1))
-    starts, ends = [], []
-    for line in day.lines:
-        period = current_period(line.slots, minute)
-        if period is None:
-            continue
-        following = next((l for l in tomorrow.lines if l.group == line.group), None) if tomorrow else None
-        tail = continues_into(line.slots, following.slots if following else None, period)
-        end = period[1] if tail is None else MINUTES_IN_DAY + tail
-        starts.append(format_moment(midnight + timedelta(minutes=period[0]), today, lang))
-        ends.append(format_moment(midnight + timedelta(minutes=end), today, lang))
-    state = "on" if not ends else "off" if len(ends) == len(day.lines) else "maybe"
+    today = now.astimezone(KYIV_TZ).date()
+    current = current_windows(lines, now)
+    state = "on" if not current else "off" if len(current) == len(lines) else "maybe"
+    starts = [format_moment(w[0], today, lang) for w in current]
+    ends = [format_moment(w[1], today, lang) for w in current]
     return {"state": state, "start": " / ".join(dict.fromkeys(starts)), "end": " / ".join(dict.fromkeys(ends))}
 
 
@@ -71,9 +61,11 @@ def battery_until(battery: Optional[dict], inverter: dict, now: datetime) -> Opt
 
 
 def schedule_payload(collector: SourceCollector, now: datetime, inverter: Optional[dict] = None,
-                     batteries: Optional[list[dict]] = None) -> dict:
+                     batteries: Optional[list[dict]] = None, actual: Optional[Actual] = None) -> dict:
     cfg = collector.config
     payload = {
+        # The power really there and DTEK's expectation, for the status headline; None falls back to DTEK's alone.
+        "power": power_status(actual, collector.latest, now, cfg.lang),
         "inverter": inverter,
         "batteries": batteries or [],
         "source": cfg.name,
@@ -159,6 +151,17 @@ def create_app(service: Service) -> FastAPI:
             rows += monitor.batteries_payload(now)
         return rows
 
+    def actual_for(name: str, now: datetime) -> Optional[Actual]:
+        """The power really there: the home's HA sensor, else the building's inverters. Not the krem inverter's
+        grid: its mini app keeps DTEK's badge, the diagram shows the grid."""
+        found = None
+        power, monitor = service.power, service.inverter
+        if power is not None and power.source == name:
+            found = power.actual(now)
+        if found is None and monitor is not None and monitor.config.batteries_source == name:
+            found = monitor.batteries_actual(now)
+        return found
+
     @app.get("/api/v1/schedule")
     async def schedule(request: Request, source: Optional[str] = Query(None)):
         collector, now = resolve(request, source), now_kyiv()
@@ -169,7 +172,8 @@ def create_app(service: Service) -> FastAPI:
             if sun and sun.get("date") == now.date().isoformat():
                 inverter["pv_forecast_kwh"] = sun.get("p50_kwh")
             inverter["battery_until"] = battery_until(await service.reserve.battery(), inverter, now)
-        payload = schedule_payload(collector, now, inverter, batteries_for(collector.name, now))
+        payload = schedule_payload(collector, now, inverter, batteries_for(collector.name, now),
+                                   actual_for(collector.name, now))
         return JSONResponse(payload, headers=NO_CACHE)
 
     @app.get("/api/v1/schedule/today")
