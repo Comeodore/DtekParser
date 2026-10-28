@@ -169,6 +169,7 @@
         .power.on .power-title { color: var(--power-title-on); }
         .power.off .power-title { color: var(--text-off); }
         .power-since { font-size: 13px; color: var(--text-secondary); margin-top: 2px; font-variant-numeric: tabular-nums; }
+        .power-for { font-weight: 600; color: var(--text-primary); }
         .power-expected {
             display: flex;
             flex-wrap: wrap;
@@ -681,8 +682,7 @@
                 powerIsOn: 'Power is on',
                 powerIsOff: 'No power',
                 since: 'since',
-                byInverter: 'per the inverter',
-                byBuilding: 'per the building\'s inverters',
+                minutesShort: 'm',
                 expectedSchedule: 'Scheduled outage',
                 expectedMaybe: 'Possible scheduled outage',
                 expectedDtek: 'DTEK: outage',
@@ -756,8 +756,7 @@
                 powerIsOn: 'Світло є',
                 powerIsOff: 'Світла немає',
                 since: 'з',
-                byInverter: 'за даними інвертора',
-                byBuilding: 'за інверторами будинку',
+                minutesShort: 'хв',
                 expectedSchedule: 'За графіком — відключення',
                 expectedMaybe: 'За графіком — можливе відключення',
                 expectedDtek: 'ДТЕК: відключення',
@@ -950,7 +949,6 @@
             };
         };
 
-        const POWER_SOURCE = { home_assistant: 'byInverter', deye_batteries: 'byBuilding' };
         const EXPECTED_OFF = {
             schedule: 'expectedSchedule', emergency: 'emergencyOutage', planned: 'plannedOutage', dtek: 'expectedDtek'
         };
@@ -973,9 +971,15 @@
         const renderPower = power => {
             $('power').className = `power ${power.state}`;
             $('powerTitle').textContent = t(power.state === 'on' ? 'powerIsOn' : 'powerIsOff');
-            const since = [power.since && `${t('since')} ${power.since}`, t(POWER_SOURCE[power.source] || 'byInverter')]
-                .filter(Boolean).join(' · ');
-            $('powerSince').textContent = since.charAt(0).toUpperCase() + since.slice(1);
+            // "Since 16:46 · 1h 12m"; the building's inverters give no time, and the line goes.
+            const sinceEl = $('powerSince');
+            sinceEl.classList.toggle('hidden', !power.since);
+            const since = t('since');
+            sinceEl.textContent = power.since ? `${since.charAt(0).toUpperCase()}${since.slice(1)} ${power.since}` : '';
+            if (power.minutes >= 1) {
+                sinceEl.append(' · ', el('span', 'power-for',
+                    power.minutes < 60 ? `${power.minutes}${t('minutesShort')}` : formatDuration(power.minutes)));
+            }
 
             $('powerExpected').classList.toggle('hidden', !power.expected);
             if (!power.expected) return;

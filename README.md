@@ -94,7 +94,8 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
 - **Mini app and API.** Each source's port serves its Telegram mini app and
   `/api/v1/*`: kem on 9999, krem on 9998.
 - **Real power first, DTEK second (kem).** The kem mini app's headline is
-  the power really there: the Home Assistant sensor (kept through a
+  the power really there, since when and for how long (no time from the
+  building's inverters, so no line): the Home Assistant sensor (kept through a
   websocket drop of up to 2 min), else the building's Deye inverters when
   they all agree. Under it comes what DTEK expects: its notice while in
   force, else the schedule, with a tag when the two differ (back early, not

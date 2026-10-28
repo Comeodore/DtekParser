@@ -132,6 +132,7 @@ def power_status(actual: Optional[Actual], snapshot: Optional[Snapshot], now: da
         "state": "on" if actual.on else "off",
         "since": moment(actual.since),
         "since_at": actual.since.isoformat() if actual.since else None,
+        "minutes": int((now - actual.since).total_seconds() // 60) if actual.since else None,
         "source": actual.source,
         "expected": None if expected is None else {
             "state": expected.state,
