@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Callable, Optional, Protocol
 
@@ -22,6 +23,21 @@ logger = logging.getLogger(__name__)
 
 # Three missed cycles: one slow or failed fetch is retried within seconds and is no reason for alarm.
 STALE_AFTER = timedelta(minutes=3)
+
+
+def error_kind(error: str) -> str:
+    """A few words for an error, the same each time it repeats: Incapsula's challenge, an HTTP status, a timeout,
+    or else where it failed and the exception's name."""
+    if "challenge" in error or "hCaptcha" in error:
+        return "Incapsula challenge"
+    status = re.search(r"HTTP (\d{3})", error)
+    if status:
+        return f"HTTP {status.group(1)}"
+    if "Timeout" in error:
+        return "timeout"
+    stage, _, rest = error.partition(": ")
+    name = re.match(r"\w+", rest)
+    return f"{stage}: {name.group(0)}" if name else stage
 
 
 class Site(Protocol):
@@ -55,6 +71,8 @@ class SourceCollector:
         self.last_success: Optional[datetime] = None
         self.failures = 0
         self.last_error = ""
+        # The error that began the current run of failures; it names the trouble in the alert while it lasts.
+        self.first_error = ""
         self._warned_time_types: set[str] = set()
 
     @property
@@ -121,7 +139,7 @@ class SourceCollector:
 
         if self.failures:
             logger.info(f"[{self.name}] recovered after {self.failures} failed cycles")
-        self.failures, self.last_error = 0, ""
+        self.failures, self.last_error, self.first_error = 0, "", ""
         previous = self.latest
         self.latest, self.last_success = snapshot, now
         if self._on_schedule and previous is not None and (
@@ -145,6 +163,8 @@ class SourceCollector:
         if self.failures == 1 or text != self.last_error or self.failures % 10 == 0:
             log = logger.warning if self.failures < 3 else logger.error
             log(f"[{self.name}] cycle failed ({self.failures} in a row): {text}")
+        if self.failures == 1:
+            self.first_error = text
         self.last_error = text
 
     def _warn_time_types(self, time_types: list) -> None:

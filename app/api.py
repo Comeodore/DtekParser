@@ -109,6 +109,22 @@ def schedule_payload(collector: SourceCollector, now: datetime, inverter: Option
     return payload
 
 
+def problem_exposition(failing: list[tuple[str, str, str]]) -> str:
+    """One sample per failing check, labelled with its reason for Grafana's "DTEK service problem" alert; nothing
+    while all is well, so the series go stale and the alert resolves."""
+    if not failing:
+        return ""
+
+    def label(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+    lines = ["# HELP dtek_service_problem 1 while this check keeps the service from working fully",
+             "# TYPE dtek_service_problem gauge"]
+    lines += [f'dtek_service_problem{{check="{label(check)}",reason="{label(reason)}"}} 1'
+              for check, reason, _ in failing]
+    return "\n".join(lines) + "\n"
+
+
 def create_app(service: Service) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -223,10 +239,12 @@ def create_app(service: Service) -> FastAPI:
 
     @app.get("/metrics")
     async def metrics(request: Request):
-        """The inverter's last reading for VictoriaMetrics, on the LAN only: not through the Cloudflare tunnel."""
+        """The inverter's last reading and what is failing, for VictoriaMetrics, on the LAN only: not through the
+        Cloudflare tunnel."""
         if request.headers.get("cf-connecting-ip"):
             raise HTTPException(404, "Not Found")
-        return PlainTextResponse(exposition(service.inverter), media_type="text/plain; version=0.0.4")
+        text = exposition(service.inverter) + problem_exposition(service.failing())
+        return PlainTextResponse(text, media_type="text/plain; version=0.0.4")
 
     @app.get("/api/v1/health")
     async def health():

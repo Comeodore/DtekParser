@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from app.collector import SourceCollector
+from app.collector import SourceCollector, error_kind
 from app.dtek.client import FetchError, RawData
 from app.notify.router import Router
 from app.storage.memory import MemoryStore
@@ -78,6 +78,35 @@ async def test_fetch_failures_do_not_touch_the_baseline(pipeline):
     assert collector.failures == 5
     assert json.dumps(store.data.sources["kem"].baseline, sort_keys=True) == baseline_before
     assert store.queued() == []
+
+
+async def test_first_error_names_a_run_of_failures(pipeline):
+    collector, site, _, clock = pipeline
+    site.fail = True
+    assert not await collector.cycle()
+    original = site.fetch
+
+    async def http_502():
+        raise FetchError("Error: getHomeNum HTTP 502: <html>")
+    site.fetch = http_502
+    assert not await collector.cycle()
+    # The alert's reason stays the first error's; the log shows the latest.
+    assert collector.first_error == "fetch: TimeoutError: page did not load"
+    assert collector.last_error == "fetch: Error: getHomeNum HTTP 502: <html>"
+    site.fetch, site.fail = original, False
+    assert await collector.cycle()
+    assert (collector.first_error, collector.last_error) == ("", "")
+
+
+@pytest.mark.parametrize("error, kind", [
+    ("fetch: Error: Page.evaluate: Error: getHomeNum HTTP 502: <html>", "HTTP 502"),
+    ("fetch: TimeoutError: Page.wait_for_function: Timeout 29999ms exceeded.", "timeout"),
+    ("fetch: Incapsula shows an hCaptcha; solve it with tools/solve_captcha.sh", "Incapsula challenge"),
+    ("fetch: getHomeNum answered result=False", "fetch: getHomeNum"),
+    ("store: ConnectionRefusedError: [Errno 111]", "store: ConnectionRefusedError"),
+])
+def test_error_kind(error, kind):
+    assert error_kind(error) == kind
 
 
 async def test_failed_commit_loses_nothing(pipeline):

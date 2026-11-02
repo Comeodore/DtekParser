@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
-from app.collector import SourceCollector
+from app.collector import SourceCollector, error_kind
 from app.config import Settings
 from app.dtek.client import BrowserPool, DtekSite
 from app.edge import Edge
@@ -116,20 +116,28 @@ class Service:
                     f"inverter={inverter}, reserve={self.reserve.url or 'off'}, "
                     f"edge={self.edge.url if self.edge else 'off'}, dry_run={self.settings.dry_run}")
 
-    def problems(self, now: Optional[datetime] = None) -> list[str]:
-        """Why the service is not fully working; empty when it is. Drives the heartbeat and /health."""
+    def failing(self, now: Optional[datetime] = None) -> list[tuple[str, str, str]]:
+        """Each check that keeps the service from working fully, as (check, reason, latest error). The reason stays
+        the same for as long as the trouble lasts, so /metrics can label Grafana's alert with it."""
         now = now or now_kyiv()
+
+        def since(moment: Optional[datetime]) -> str:
+            return moment.astimezone(KYIV_TZ).strftime("%d.%m %H:%M") if moment else "the start"
+
         found = []
         for c in self.collectors.values():
             if not c.healthy(now):
-                since = c.last_success.astimezone(KYIV_TZ).strftime("%d.%m %H:%M") if c.last_success else "start"
-                detail = f": {c.last_error}" if c.last_error else ""
-                found.append(f"{c.name}: no successful DTEK fetch since {since}{detail}")
+                kind = f" ({error_kind(c.first_error)})" if c.first_error else ""
+                found.append((c.name, f"no DTEK data since {since(c.last_success)}{kind}", c.last_error))
         if self.power is not None and not self.power.connected:
-            found.append("power: Home Assistant is not connected")
+            found.append(("power", f"Home Assistant not connected since {since(self.power.lost_at)}", ""))
         if self.outbox.last_cycle is None or time.monotonic() - self.outbox.last_cycle > self.OUTBOX_STALE_S:
-            found.append("outbox: message delivery loop is not cycling")
+            found.append(("outbox", "Telegram delivery loop is not cycling", ""))
         return found
+
+    def problems(self, now: Optional[datetime] = None) -> list[str]:
+        """Why the service is not fully working; empty when it is. Drives the heartbeat and /health."""
+        return [f"{check}: {reason}" + (f": {error}" if error else "") for check, reason, error in self.failing(now)]
 
     async def _heartbeat(self) -> None:
         """One heartbeat for the whole service, sent only while nothing is wrong."""

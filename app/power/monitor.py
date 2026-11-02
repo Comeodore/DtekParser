@@ -73,6 +73,11 @@ class PowerMonitor:
     def source(self) -> str:
         return self._config.source
 
+    @property
+    def lost_at(self) -> Optional[datetime]:
+        """When the last connection to HA was lost; None if it never connected."""
+        return self._lost_at
+
     def actual(self, now: datetime) -> Optional[Actual]:
         """The home's power for the mini app's status; None until HA has said it, while HA is away or while the
         sensor has no value."""

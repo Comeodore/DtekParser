@@ -243,10 +243,10 @@ def test_only_the_inverters_source_gets_it(monkeypatch):
 
 
 def scrape(http: TestClient) -> dict[str, tuple[float, Optional[int]]]:
-    """/metrics as {series: (value, timestamp in ms or None)}."""
+    """The inverter's part of /metrics as {series: (value, timestamp in ms or None)}."""
     samples = {}
     for line in http.get("/metrics").text.splitlines():
-        if not line.startswith("#"):
+        if line.startswith("deye_"):
             series, value, *stamp = line.split(" ")
             samples[series] = (float(value), int(stamp[0]) if stamp else None)
     return samples

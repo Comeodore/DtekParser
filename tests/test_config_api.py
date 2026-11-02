@@ -114,14 +114,29 @@ def test_mini_app_page(client):
 def test_problems_name_each_failing_check(client):
     _, service = client
     now = kyiv(2026, 10, 1, 12, 1)
+    service.collectors["krem"].first_error = "fetch: Error: getHomeNum HTTP 502: <html>"
     service.collectors["krem"].last_error = "fetch: TimeoutError: page did not load"
     problems = service.problems(now)
     assert problems == [
-        "krem: no successful DTEK fetch since start: fetch: TimeoutError: page did not load",
-        "power: Home Assistant is not connected",
-        "outbox: message delivery loop is not cycling",
+        "krem: no DTEK data since the start (HTTP 502): fetch: TimeoutError: page did not load",
+        "power: Home Assistant not connected since the start",
+        "outbox: Telegram delivery loop is not cycling",
     ]
     service.collectors["krem"].last_success = now
     service.power.connected = True
     service.outbox.last_cycle = time.monotonic()
     assert service.problems(now) == []
+
+
+def test_metrics_label_each_failing_check_with_its_reason(client, monkeypatch):
+    http, service = client
+    monkeypatch.setattr("app.service.now_kyiv", lambda: kyiv(2026, 10, 1, 12, 5))
+    service.collectors["kem"].first_error = "fetch: Error: getHomeNum HTTP 502: <html>"
+    service.collectors["kem"].last_error = 'fetch: TimeoutError: "quoted"'
+    service.collectors["krem"].last_success = kyiv(2026, 10, 1, 12, 4)
+    service.outbox.last_cycle = time.monotonic()
+    service.power.connected = True
+    lines = [line for line in http.get("/metrics").text.splitlines() if line.startswith("dtek_service_problem")]
+    assert lines == ['dtek_service_problem{check="kem",reason="no DTEK data since 01.10 12:00 (HTTP 502)"} 1']
+    service.collectors["kem"].last_success = kyiv(2026, 10, 1, 12, 4)
+    assert "dtek_service_problem" not in http.get("/metrics").text
