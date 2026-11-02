@@ -91,6 +91,9 @@ class Settings:
     deye: Optional[DeyeConfig] = None
     reserve_url: Optional[str] = None   # deye-reserve, told when the inverter's schedule or grid changes
     owner_id: Optional[int] = None      # the Telegram user who alone sees deye-reserve's table in the mini app
+    # The reserve on Cloudflare (cf-watch/), which messages the chats while this service is away; off when unset.
+    edge_url: Optional[str] = None
+    edge_key: Optional[str] = None
 
     def source(self, name: str) -> SourceConfig:
         return next(s for s in self.sources if s.name == name)
@@ -255,6 +258,10 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
             night_end_h=night_end,
         )
 
+    edge_url, edge_key = _get(env, "EDGE_URL"), _get(env, "EDGE_KEY")
+    if (edge_url is None) != (edge_key is None):
+        raise ConfigError("EDGE_URL and EDGE_KEY go together")
+
     return Settings(
         database_url=_require(env, "DATABASE_URL"),
         db_schema=_get(env, "DB_SCHEMA", "public"),
@@ -269,4 +276,6 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
         deye=deye,
         reserve_url=_get(env, "DEYE_RESERVE_URL") if deye is not None else None,
         owner_id=_owner(env) if deye is not None and _get(env, "DEYE_RESERVE_URL") else None,
+        edge_url=edge_url.rstrip("/") if edge_url else None,
+        edge_key=edge_key,
     )

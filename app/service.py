@@ -12,6 +12,7 @@ from typing import Awaitable, Callable, Optional
 from app.collector import SourceCollector
 from app.config import Settings
 from app.dtek.client import BrowserPool, DtekSite
+from app.edge import Edge
 from app.heartbeat import Heartbeat
 from app.inverter.deye import InverterMonitor
 from app.notify.outbox import Gateway, OutboxSender, TelegramGateway
@@ -56,6 +57,8 @@ class Service:
         # deye-reserve plans the krem inverter's TOU table; it is told when that source's schedule or grid changes.
         self.reserve = ReserveHook(settings.reserve_url)
         reserve_source = settings.deye.source if settings.deye is not None else None
+        # The reserve on Cloudflare: messages the chats with DTEK's news while this service is away.
+        self.edge = Edge(settings.edge_url, settings.edge_key, settings.bots) if settings.edge_url else None
 
         self.sites: dict[str, DtekSite] = {}
         self.collectors: dict[str, SourceCollector] = {}
@@ -66,6 +69,7 @@ class Service:
             self.collectors[cfg.name] = SourceCollector(
                 cfg, site, self.store, self.router, settings.fetch_interval, on_messages=self.outbox.wake,
                 on_schedule=(lambda stamp: self.reserve.fire("schedule", stamp)) if cfg.name == reserve_source else None,
+                edge=self.edge,
             )
 
         self.power: Optional[PowerMonitor] = None
@@ -109,7 +113,8 @@ class Service:
             self._spawn("instance-lock", self._watch_lock)
         inverter = f"deye→{self.inverter.source}" if self.inverter else "off"
         logger.info(f"Service started: sources={list(self.collectors)}, power={'on' if self.power else 'off'}, "
-                    f"inverter={inverter}, reserve={self.reserve.url or 'off'}, dry_run={self.settings.dry_run}")
+                    f"inverter={inverter}, reserve={self.reserve.url or 'off'}, "
+                    f"edge={self.edge.url if self.edge else 'off'}, dry_run={self.settings.dry_run}")
 
     def problems(self, now: Optional[datetime] = None) -> list[str]:
         """Why the service is not fully working; empty when it is. Drives the heartbeat and /health."""
@@ -170,5 +175,7 @@ class Service:
         await self.pool.close()
         if isinstance(self.gateway, TelegramGateway):
             await self.gateway.close()
+        if self.edge is not None:
+            await self.edge.close()
         await self.store.close()
         logger.info("Service stopped")

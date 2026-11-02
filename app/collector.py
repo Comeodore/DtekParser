@@ -11,6 +11,7 @@ from app.dtek.client import FetchError, RawData
 from app.dtek.legacy import legacy_row
 from app.dtek.models import Snapshot
 from app.dtek.protocol import ProtocolError, build_snapshot, parse_fact, parse_house, unknown_time_types
+from app.edge import Edge
 from app.engine.detector import Baseline, detect
 from app.engine.events import ScheduleEvent
 from app.notify.router import Router
@@ -38,8 +39,10 @@ class SourceCollector:
         clock: Callable[[], datetime] = now_kyiv,
         on_messages: Optional[Callable[[], None]] = None,
         on_schedule: Optional[Callable[[str], None]] = None,
+        edge: Optional[Edge] = None,
     ):
         self.config = config
+        self._edge = edge
         self._site = site
         self._store = store
         self._router = router
@@ -98,10 +101,15 @@ class SourceCollector:
             return False
         self._warn_time_types(raw.time_types)
 
+        # Back after a while: the reserve may have messaged the chats meanwhile, so go on from what it sent.
+        claimed = None
+        if self._edge is not None and self._edge.away(self.name, now):
+            claimed = await self._edge.claim(self.name)
+
         try:
             async with self._store.transaction() as tx:
                 state = await tx.load_source_state(self.name)
-                baseline = Baseline.from_dict(state.baseline) if state else None
+                baseline = Baseline.from_dict(claimed or (state.baseline if state else None))
                 detection = detect(baseline, snapshot, now, self.config.fingerprint)
                 messages = self._router.for_events(self.config, detection.events, snapshot, now)
                 await tx.save_source_state(self.name, snapshot.to_dict(), detection.baseline.to_dict(), now)
@@ -126,6 +134,8 @@ class SourceCollector:
             logger.info(f"[{self.name}] event: {event}")
         if messages and self._on_messages:
             self._on_messages()
+        if self._edge is not None:
+            await self._edge.push(self.config, detection.baseline.to_dict(), now)
         return True
 
     def _failed(self, stage: str, error: Exception) -> None:
