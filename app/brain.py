@@ -9,6 +9,9 @@ this service runs, but it is down with it, so while the reserve is in charge the
 tomorrow's schedule as text each time they are first seen or come to differ from what the chats were last
 shown, even when there is no change to report: on taking a source over, when schedules apply again after an
 emergency without them, when tomorrow is published with no outages.
+
+For a source the worker marks so (kem), DTEK's notices of outages by the schedule are sent too: the start, a new
+end and the end. This service leaves them to the mini app, which is down with it.
 """
 from __future__ import annotations
 
@@ -63,7 +66,7 @@ def process(request: dict) -> dict:
     """request: source, now (ms), building, answer (getHomeNum), fact, names, and from the home service's last
     push: baseline, fingerprint, lang, notify_outages. With `shown`, the days the chats were last shown (as the
     reply's `shown` of the call before; [] for none), the schedules are sent as well, and the reply has the
-    next `shown`."""
+    next `shown`. With `scheduled_notices`, the notices of outages by the schedule as well."""
     now = datetime.fromtimestamp(request["now"] / 1000, KYIV_TZ)
     snapshot = build_snapshot(
         request["source"],
@@ -76,7 +79,7 @@ def process(request: dict) -> dict:
     source = SimpleNamespace(name=request["source"], lang=request["lang"], notify_outages=request["notify_outages"])
     reply = {
         "baseline": detection.baseline.to_dict(),
-        "texts": event_texts(source, detection.events, snapshot, now),
+        "texts": event_texts(source, detection.events, snapshot, now, bool(request.get("scheduled_notices"))),
         "events": [describe(e) for e in detection.events],
         "initialized": detection.initialized,
     }

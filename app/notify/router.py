@@ -31,26 +31,29 @@ class OutgoingMessage:
     expires_at: datetime
 
 
-def _notifiable(outage: Optional[Outage]) -> bool:
-    return outage is not None and (outage.kind in NOTIFIABLE_KINDS or outage.schedules_suspended)
+def _notifiable(outage: Optional[Outage], scheduled: bool = False) -> bool:
+    return outage is not None and (scheduled or outage.kind in NOTIFIABLE_KINDS or outage.schedules_suspended)
 
 
-def should_send(event: Event, source: SourceConfig) -> bool:
+def should_send(event: Event, source: SourceConfig, scheduled: bool = False) -> bool:
+    """`scheduled`: the notices of outages by the schedule as well, which this service leaves to the mini app;
+    the reserve sends them for kem while it is in charge and the mini app is down (edge/worker.js)."""
     if isinstance(event, ScheduleEvent):
         return True
     if not source.notify_outages:
         return False
     if event.change is OutageChange.STARTED:
-        return _notifiable(event.outage)
-    return _notifiable(event.outage) or _notifiable(event.previous)
+        return _notifiable(event.outage, scheduled)
+    return _notifiable(event.outage, scheduled) or _notifiable(event.previous, scheduled)
 
 
-def event_texts(source: SourceConfig, events: Iterable[Event], snapshot: Snapshot, now: datetime) -> list[str]:
+def event_texts(source: SourceConfig, events: Iterable[Event], snapshot: Snapshot, now: datetime,
+                scheduled: bool = False) -> list[str]:
     """What a source's chats get for these events. Also run by the reserve's dtek-brain, which passes only
     the name, lang and notify_outages of the source."""
     texts: list[str] = []
     for event in events:
-        if not should_send(event, source):
+        if not should_send(event, source, scheduled):
             logger.info(f"[{source.name}] not notifying {event}")
             continue
         if isinstance(event, ScheduleEvent):

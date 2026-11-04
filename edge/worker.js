@@ -37,8 +37,11 @@
 
 import { DurableObject } from "cloudflare:workers";
 
+// scheduled_notices: while the reserve is in charge, DTEK's notices of outages by the schedule go to the chats
+// too (start, new end, end): the home service leaves them to the mini app, which is down with it; kem only
+// (04.11.2026).
 const SOURCES = {
-  kem: { site: "https://www.dtek-kem.com.ua" },
+  kem: { site: "https://www.dtek-kem.com.ua", scheduled_notices: true },
   krem: { site: "https://www.dtek-krem.com.ua" },
 };
 const WATCHED = ["kem", "krem"];
@@ -515,6 +518,7 @@ export class Watcher extends DurableObject {
               fingerprint: home.fingerprint,
               lang: home.lang,
               notify_outages: home.notify_outages,
+              scheduled_notices: Boolean(SOURCES[source].scheduled_notices),
               shown: shown || [],
             }),
           ),

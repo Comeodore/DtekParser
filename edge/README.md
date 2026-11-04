@@ -47,6 +47,10 @@ at the address with its changes. Power going off or coming back stays with the h
   from the turn, so a home service that comes and goes does not make the reserve repeat it. Added
   on 04.11.2026, after kem's emergency without schedules turned into an outage by the schedule at
   11:09 and the kem chats, with the lab off, had no way to see the day.
+- **Outages by the schedule, kem only.** DTEK's notice of an outage the schedule applies
+  ("Стабілізаційне відключення (Згідно графіку…)") is no message of the home service: the mini app
+  shows it. While the reserve is in charge, kem's chats get it as text too: its start, a new end
+  and its end (`scheduled_notices` in `SOURCES`, worker.js). krem stays as at home.
 - **Nothing piles up.** dtek-service now drops DTEK's news it could not deliver within 15
   minutes (`EVENT_TTL`) instead of 6 hours: after an outage its next cycle reports the difference
   as it is then.

@@ -59,12 +59,12 @@ def reserve_read(site, push, now, **extra):
     })
 
 
-def reserve_reads(site, push):
+def reserve_reads(site, push, **extra):
     """The reserve in charge: each read goes on from the baseline and the days shown of the one before."""
     state = {"baseline": push["baseline"], "shown": []}
 
     def read(now):
-        reply = reserve_read(site, dict(push, baseline=state["baseline"]), now, shown=state["shown"])
+        reply = reserve_read(site, dict(push, baseline=state["baseline"]), now, shown=state["shown"], **extra)
         state.update(baseline=reply["baseline"], shown=reply["shown"])
         return reply
     return read
@@ -215,3 +215,38 @@ def test_edge_url_and_key_go_together():
         load_settings(dict(BASE_ENV, EDGE_URL="https://edge.test"))
     settings = load_settings(dict(BASE_ENV, EDGE_URL="https://edge.test/", EDGE_KEY="k"))
     assert (settings.edge_url, settings.edge_key) == ("https://edge.test", "k")
+
+
+STABILISATION = "Стабілізаційне відключення (Згідно графіку погодинних відключень)"
+
+
+@pytest.mark.parametrize("scheduled", [True, False])
+async def test_reserve_sends_outages_by_the_schedule_only_where_marked(pipeline, scheduled):
+    """kem: while the reserve is in charge the mini app is down, so DTEK's notice of an outage by the schedule goes
+    to the chats as text, from its start to its end. Elsewhere, and from the home service, it does not."""
+    collector, site, _, _, edge = pipeline
+    site.fact = fact("01.10.2026 06:50", {DAY_OCT1: {"GPV4.1": hours(19, 20)}})
+    await collector.cycle()
+    read = reserve_reads(site, edge.calls[-1][2], **({"scheduled_notices": True} if scheduled else {}))
+    read(kyiv(2026, 10, 1, 18, 10))
+    house = site.answer["data"]["43"]
+    house.update(type="2", start_date="19:02 01.10.2026", end_date="21:00 01.10.2026", sub_type=STABILISATION)
+    started = read(kyiv(2026, 10, 1, 19, 5))
+    house.update(end_date="22:00 01.10.2026")
+    moved = read(kyiv(2026, 10, 1, 19, 10))
+    for key in ("type", "start_date", "end_date", "sub_type"):
+        house.pop(key, None)
+    read(kyiv(2026, 10, 1, 21, 55))
+    ended = read(kyiv(2026, 10, 1, 22, 0))
+    assert [r["events"] for r in (started, moved, ended)] == [
+        ["outage started"], ["outage restoration_changed"], ["outage ended"]]
+    if not scheduled:
+        assert started["texts"] == moved["texts"] == ended["texts"] == []
+        return
+    assert started["texts"][0].startswith("⚡ <b>Outage at the address</b>\n\n")
+    assert "19:02" in started["texts"][0] and "21:00" in started["texts"][0]
+    assert moved["texts"][0].startswith("🕐 <b>Restoration time changed</b>\n\n21:00 → <b>until 22:00</b>")
+    assert ended["texts"] == ["✅ <b>DTEK no longer reports an outage at the address</b>"]
+    # Each once, and nothing else on top: the day did not change.
+    assert [len(r["texts"]) for r in (started, moved, ended)] == [1, 1, 1]
+
