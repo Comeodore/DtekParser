@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Mapping, Optional
+from typing import Callable, Mapping, Optional
 
 import aiohttp
 
@@ -34,6 +34,8 @@ class Edge:
         self._session: Optional[aiohttp.ClientSession] = None
         self._pushed: dict[str, datetime] = {}
         self._errors: dict[str, str] = {}
+        # Per source, what the reserve needs to read Deye itself for the mini app it stands in for (set by Service).
+        self.deye: Callable[[str], Optional[dict]] = lambda source: None
 
     def away(self, source: str, now: datetime) -> bool:
         """Whether the reserve may have taken this source over since its last push (or since the start)."""
@@ -59,6 +61,9 @@ class Edge:
             "chat_ids": list(config.chat_ids),
             "token": self._bots.get(config.bot, ""),
         }
+        deye = self.deye(config.name)
+        if deye is not None:
+            body["deye"] = deye
         if await self._post(config.name, "home", body) is not None:
             self._pushed[config.name] = now
 

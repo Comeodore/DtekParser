@@ -17,7 +17,18 @@
   "triggers": { "crons": ["*/10 * * * *"] },
   "durable_objects": { "bindings": [{ "name": "WATCHER", "class_name": "Watcher" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Watcher"] }],
-  "services": [{ "binding": "BRAIN", "service": "dtek-brain" }],
+  // POWER: svitlo-edge's Power entrypoint, the kem Victron from VRM for the stand-in mini app.
+  "services": [
+    { "binding": "BRAIN", "service": "dtek-brain" },
+    { "binding": "POWER", "service": "svitlo-edge", "entrypoint": "Power" }
+  ],
+  // The mini apps' hosts: passed on to the home service, stood in for while it does not answer (worker.js standIn).
+  "routes": [
+    { "pattern": "dtek-schedule.comeodore.services/*", "zone_name": "comeodore.services" },
+    { "pattern": "dtek-krem-schedule.comeodore.services/*", "zone_name": "comeodore.services" }
+  ],
+  // The page itself, app/static/index.html, as a Text module (uploaded as edge/worker.js + app/static/index.html).
+  "rules": [{ "type": "Text", "globs": ["**/*.html"], "fallthrough": true }],
   "d1_databases": [
     {
       "binding": "DB",

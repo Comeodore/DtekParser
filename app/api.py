@@ -13,13 +13,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from app.collector import SourceCollector
-from app.dtek.legacy import legacy_row
-from app.dtek.models import Snapshot
 from app.inverter.metrics import exposition
-from app.power.verdict import Actual, current_windows, power_status, schedule_windows
+from app.page import page_payload, scheduled_status  # noqa: F401  (scheduled_status: tests)
+from app.power.verdict import Actual
 from app.reserve_hook import charge_table
 from app.service import Service
-from app.timeutil import KYIV_TZ, format_moment, now_kyiv
+from app.timeutil import KYIV_TZ, now_kyiv
 from app.webapp_auth import webapp_user
 from app.wol import send_magic_packet
 
@@ -28,22 +27,6 @@ logger = logging.getLogger(__name__)
 APP_VERSION = "3.0.0"
 STATIC_DIR = Path(__file__).parent / "static"
 NO_CACHE = {"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"}
-
-
-def scheduled_status(snapshot: Snapshot, now: datetime, lang: str) -> Optional[dict]:
-    """Power right now according to today's schedule; None when there is no schedule to go by.
-
-    "maybe" is a house fed by several lines with only some of them off.
-    """
-    lines = schedule_windows(snapshot, now)
-    if lines is None:
-        return None
-    today = now.astimezone(KYIV_TZ).date()
-    current = current_windows(lines, now)
-    state = "on" if not current else "off" if len(current) == len(lines) else "maybe"
-    starts = [format_moment(w[0], today, lang) for w in current]
-    ends = [format_moment(w[1], today, lang) for w in current]
-    return {"state": state, "start": " / ".join(dict.fromkeys(starts)), "end": " / ".join(dict.fromkeys(ends))}
 
 
 # deye-reserve looks at the battery every 3 min: an estimate older than this is not the present load's.
@@ -63,50 +46,8 @@ def battery_until(battery: Optional[dict], inverter: dict, now: datetime) -> Opt
 def schedule_payload(collector: SourceCollector, now: datetime, inverter: Optional[dict] = None,
                      batteries: Optional[list[dict]] = None, actual: Optional[Actual] = None) -> dict:
     cfg = collector.config
-    payload = {
-        # The power really there and DTEK's expectation, for the status headline; None falls back to DTEK's alone.
-        "power": power_status(actual, collector.latest, now, cfg.lang),
-        "inverter": inverter,
-        "batteries": batteries or [],
-        "source": cfg.name,
-        "parser_type": cfg.name,
-        "lang": cfg.lang,
-        "healthy": collector.healthy(now),
-        "updated_at": collector.last_success.isoformat() if collector.last_success else None,
-        "current_outage": None,
-        "today": None,
-        "tomorrow": None,
-        "outage": None,
-        "scheduled_status": None,
-        "days": [],
-        "schedule_updated": "",
-        "outage_updated": "",
-        "availability": None,
-        "schedules_suspended": False,
-    }
-    snapshot = collector.latest
-    if snapshot is None:
-        return payload
-    today = now.astimezone(KYIV_TZ).date()
-    legacy = legacy_row(snapshot, today)
-    payload.update(
-        current_outage=legacy["current_outage"],
-        today=legacy["today"],
-        tomorrow=legacy["tomorrow"],
-        outage=snapshot.outage.to_dict() if snapshot.outage else None,
-        scheduled_status=scheduled_status(snapshot, now, cfg.lang),
-        days=[
-            {"date": d.date.isoformat(), "label": d.date.strftime("%d.%m.%y"),
-             "is_today": d.date == today, "lines": [line.to_dict() for line in d.lines]}
-            for d in snapshot.days
-            if today <= d.date <= today + timedelta(days=1)
-        ],
-        schedule_updated=snapshot.schedule_updated,
-        outage_updated=snapshot.outage_updated,
-        availability=snapshot.availability.value,
-        schedules_suspended=snapshot.schedules_suspended,
-    )
-    return payload
+    return page_payload(collector.latest, now, cfg.name, cfg.lang, collector.healthy(now), collector.last_success,
+                        inverter, batteries, actual)
 
 
 def problem_exposition(failing: list[tuple[str, str, str]]) -> str:

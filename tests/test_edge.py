@@ -250,3 +250,75 @@ async def test_reserve_sends_outages_by_the_schedule_only_where_marked(pipeline,
     # Each once, and nothing else on top: the day did not change.
     assert [len(r["texts"]) for r in (started, moved, ended)] == [1, 1, 1]
 
+
+
+def reserve_page(site, now, read_at=None, **extra):
+    """The mini app's data as worker.js asks dtek-brain for it while the home service is away."""
+    return brain.page({
+        "source": "kem", "now": int(now.timestamp() * 1000), "building": "43",
+        "answer": copy.deepcopy(site.answer), "fact": copy.deepcopy(site.fact), "names": {"GPV4.1": "Черга 4.1"},
+        "read_at": int((read_at or now).timestamp() * 1000), "lang": "en", **extra,
+    })
+
+
+def ms(at):
+    return int(at.timestamp() * 1000)
+
+
+def test_reserve_page_shows_the_last_read_and_the_victron():
+    site = FakeSite()
+    site.fact = fact("01.10.2026 06:50", {DAY_OCT1: {"GPV4.1": hours(19, 20)}, DAY_OCT2: {"GPV4.1": hours(8)}})
+    now = kyiv(2026, 10, 1, 19, 30)
+    victron = {"grid": False, "grid_since": ms(kyiv(2026, 10, 1, 19, 2)), "grid_at": ms(now) - 40_000,
+               "soc": 71.5, "battery_w": -420, "battery_at": ms(now) - 40_000}
+    page = reserve_page(site, now, read_at=kyiv(2026, 10, 1, 19, 27), victron=victron)
+    assert page["reserve"] is True and page["healthy"] is True and page["source"] == "kem"
+    assert page["updated_at"].startswith("2026-10-01T19:27")
+    assert [d["date"] for d in page["days"]] == ["2026-10-01", "2026-10-02"]
+    assert page["scheduled_status"]["state"] == "off"
+    assert (page["power"]["state"], page["power"]["since"], page["power"]["source"]) == ("off", "19:02", "vrm")
+    assert page["power"]["expected"]["state"] == "off"
+    assert page["batteries"] == [{"name": "home", "soc": 71.5, "battery_w": -420, "stale": False}]
+
+
+def test_reserve_page_without_fresh_data_says_so():
+    site = FakeSite()
+    now = kyiv(2026, 10, 1, 19, 30)
+    old = ms(now) - 20 * 60_000
+    victron = {"grid": True, "grid_since": None, "grid_at": old, "soc": 40, "battery_w": 0, "battery_at": old}
+    page = reserve_page(site, now, read_at=kyiv(2026, 10, 1, 19, 10), victron=victron)
+    # A read 20 minutes old may be out of date; a grid state that old is not the power there.
+    assert page["healthy"] is False
+    assert page["power"] is None
+    assert page["batteries"] == [{"name": "home", "soc": 40, "battery_w": 0, "stale": True}]
+
+
+def test_reserve_page_falls_back_on_the_building_inverters():
+    site = FakeSite()
+    now = kyiv(2026, 10, 1, 19, 30)
+    deye = [{"name": "elevator", "soc": 88, "battery_w": -150, "grid": False, "at": ms(now) - 60_000},
+            {"name": "water", "soc": 64, "battery_w": 900, "grid": False, "at": ms(now) - 90_000}]
+    page = reserve_page(site, now, deye=deye)
+    assert (page["power"]["state"], page["power"]["since"], page["power"]["source"]) == ("off", None, "deye_batteries")
+    assert [(b["name"], b["soc"], b["stale"]) for b in page["batteries"]] == [("elevator", 88, False), ("water", 64, False)]
+    # With the Victron there, it comes first and its battery leads the row.
+    victron = {"grid": True, "grid_since": ms(now) - 3_600_000, "grid_at": ms(now), "soc": 90, "battery_w": 50,
+               "battery_at": ms(now)}
+    page = reserve_page(site, now, deye=deye, victron=victron)
+    assert (page["power"]["state"], page["power"]["source"]) == ("on", "vrm")
+    assert [b["name"] for b in page["batteries"]] == ["home", "elevator", "water"]
+    # Inverters that disagree say nothing about the grid.
+    deye[1]["grid"] = True
+    assert reserve_page(site, now, deye=deye)["power"] is None
+
+
+async def test_the_batteries_source_pushes_what_the_reserve_reads_deye_with(pipeline):
+    collector, _, _, _, edge = pipeline
+    access = {"token": "t", "expires_at": 1, "base_url": "https://deye.test", "batteries": [["elevator", "1"]],
+              "min_grid_voltage": 100}
+    edge.deye = lambda source: access if source == "kem" else None
+    await collector.cycle()
+    assert edge.calls[-1][2]["deye"] == access
+    edge.deye = lambda source: None
+    await collector.cycle()
+    assert "deye" not in edge.calls[-1][2]

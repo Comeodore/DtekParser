@@ -28,6 +28,13 @@
 // MODE=test runs the reserve on every read from a baseline of its own and sends only to TEST_CHAT_ID, marked,
 // without taking the turn from the home service; any other MODE only reads.
 //
+// The mini apps' addresses (dtek-schedule / dtek-krem-schedule.comeodore.services, Cloudflare Tunnel to the home
+// service) are routed through here too. Every request goes on to the home service as before; only when it does not
+// answer (the tunnel or the service down) the page and its /api/v1/schedule come from here instead: the same
+// index.html, with data dtek-brain builds from the last read here, and for kem the power really there and the
+// batteries: the Victron as VRM has it (svitlo-edge, over a service binding) and the building's Deye inverters,
+// read with the Deye token the home service pushed.
+//
 // Budget on Workers Free, shared with airdanger (see README.md):
 // - a Durable Object is billed only while it works (a read, a push, a send), well inside what
 //   airdanger's Poller leaves of the free duration;
@@ -36,14 +43,35 @@
 // - one D1 write per read.
 
 import { DurableObject } from "cloudflare:workers";
+// Served as the mini app while the home service is away (a Text module).
+import PAGE_HTML from "../app/static/index.html";
 
 // scheduled_notices: while the reserve is in charge, DTEK's notices of outages by the schedule go to the chats
 // too (start, new end, end): the home service leaves them to the mini app, which is down with it; kem only
 // (04.11.2026).
+// page: the host of the source's mini app, stood in for while the home service is away; victron: its page shows
+// the home's Victron (svitlo-edge).
 const SOURCES = {
-  kem: { site: "https://www.dtek-kem.com.ua", scheduled_notices: true },
-  krem: { site: "https://www.dtek-krem.com.ua" },
+  kem: {
+    site: "https://www.dtek-kem.com.ua",
+    scheduled_notices: true,
+    page: "dtek-schedule.comeodore.services",
+    victron: true,
+  },
+  krem: { site: "https://www.dtek-krem.com.ua", page: "dtek-krem-schedule.comeodore.services" },
 };
+const PAGES = Object.fromEntries(
+  Object.entries(SOURCES).filter(([, s]) => s.page).map(([name, s]) => [s.page, name]),
+);
+// What Cloudflare answers for a tunnel or origin that is down: 530 is error 1033, no tunnel connected.
+const ORIGIN_DOWN = new Set([502, 503, 504, 520, 521, 522, 523, 524, 530]);
+const ORIGIN_TIMEOUT_MS = 8 * 1000;
+// The page asks every 10 s; one dtek-brain call serves it this long.
+const PAGE_CACHE_MS = 20 * 1000;
+// The Deye loggers upload every ~72 s.
+const DEYE_EVERY_MS = 60 * 1000;
+const DEYE_TIMEOUT_MS = 10 * 1000;
+const NO_CACHE = { "cache-control": "no-cache, no-store, must-revalidate" };
 const WATCHED = ["kem", "krem"];
 // 5 minutes was the longest interval of the round on 01.11.2026, and reading more often drew no
 // fewer challenges.
@@ -455,6 +483,8 @@ export class Watcher extends DurableObject {
       strikes,
       ...(fresh ? { fact, names } : {}),
       ...(traceDue ? { trace_at: started } : {}),
+      // The last good read's house, for the page while the home service is away.
+      ...(row.ok ? { house, house_ts: answer.updateTimestamp || null, read_at: started } : {}),
     });
     if (row.ok) Object.assign(row, await this.turn(source, where.building, answer, house, fact, names, started));
     if (traceRead) Object.assign(row, await traceRead);
@@ -543,6 +573,85 @@ export class Watcher extends DurableObject {
     });
   }
 
+  // The mini app's /api/v1/schedule while the home service is away: dtek-brain's page from the last good read,
+  // with the Victron (svitlo-edge) where the source has one and the building's Deye inverters where the home
+  // service pushed a token for them. A JSON string, or null before the first good read.
+  async page(source) {
+    const now = Date.now();
+    if (this.pageCache && now - this.pageCache.at < PAGE_CACHE_MS) return this.pageCache.body;
+    const got = await this.ctx.storage.get(["house", "house_ts", "read_at", "fact", "names", "home"]);
+    const house = got.get("house");
+    const fact = got.get("fact");
+    const home = got.get("home") || {};
+    if (!house || !fact || !got.get("read_at")) return null;
+    const { building } = address(this.env, source);
+    const forBrain = forHouse(fact, got.get("names") || {}, house.sub_type_reason || []);
+    const [victron, deye] = await Promise.all([
+      SOURCES[source].victron ? this.victron() : null,
+      this.deyeBatteries(home.deye, now),
+    ]);
+    const body = await this.env.BRAIN.page(
+      JSON.stringify({
+        source,
+        now,
+        building,
+        answer: { result: true, data: { [building]: house }, updateTimestamp: got.get("house_ts") },
+        fact: forBrain.fact,
+        names: forBrain.names,
+        read_at: got.get("read_at"),
+        lang: home.lang || "uk",
+        victron,
+        deye,
+      }),
+    );
+    this.pageCache = { at: now, body };
+    return body;
+  }
+
+  // svitlo-edge's last VRM read, as dtek-brain's power_now takes it; null when it cannot be had.
+  async victron() {
+    try {
+      const p = await this.env.POWER.now();
+      return {
+        grid: p.grid,
+        grid_since: p.gridSince,
+        grid_at: p.gridAt,
+        soc: p.soc,
+        battery_w: p.batteryW,
+        battery_at: p.batteryAt,
+      };
+    } catch (e) {
+      console.warn(`victron: ${e}`);
+      return null;
+    }
+  }
+
+  // The building's inverters from Deye Cloud (device/latest, one call for all), with the token the home service
+  // pushed; at most once a minute. Null without a token that is still good, or when the call fails.
+  async deyeBatteries(deye, now) {
+    if (!deye?.token || !(deye.expires_at > now) || !deye.batteries?.length) return null;
+    if (this.deyeCache && now - this.deyeCache.at < DEYE_EVERY_MS) return this.deyeCache.rows;
+    let rows = null;
+    try {
+      const data = await within(DEYE_TIMEOUT_MS, async (signal) => {
+        const response = await fetch(`${deye.base_url}/v1.0/device/latest`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${deye.token}` },
+          body: JSON.stringify({ deviceList: deye.batteries.map(([, sn]) => sn) }),
+          signal,
+        });
+        return response.json();
+      });
+      if (!data.success) throw new Error(`device/latest: ${data.code} ${data.msg}`);
+      const bySn = new Map((data.deviceDataList || []).map((item) => [item.deviceSn, item]));
+      rows = deye.batteries.map(([name, sn]) => deyeRow(name, bySn.get(sn), deye.min_grid_voltage)).filter(Boolean);
+    } catch (e) {
+      console.warn(`deye: ${e}`);
+    }
+    this.deyeCache = { at: now, rows };
+    return rows;
+  }
+
   // Up to SEND_PER_RUN queued messages, in order per chat; a chat that has to wait holds back its later ones.
   async send(source) {
     const got = await this.ctx.storage.get(["outbox", "home"]);
@@ -578,6 +687,57 @@ export class Watcher extends DurableObject {
   }
 }
 
+// One inverter of device/latest as dtek-brain's power_now takes it; as parse_device_latest at home: Deye reports
+// battery power negative while charging, and the grid is there when its voltage reaches min_grid_voltage.
+export function deyeRow(name, item, minGridVoltage) {
+  if (!item?.collectionTime) return null;
+  const values = Object.fromEntries((item.dataList || []).map((point) => [point.key, point.value]));
+  const num = (...keys) => {
+    for (const key of keys) {
+      const value = parseFloat(values[key]);
+      if (Number.isFinite(value)) return value;
+    }
+    return null;
+  };
+  const battery = num("BatteryPower");
+  const gridV = num("GridVoltageL1L2", "GridVoltageL1");
+  return {
+    name,
+    soc: num("SOC"),
+    battery_w: battery === null ? null : -battery,
+    grid: gridV !== null && gridV >= minGridVoltage,
+    at: Number(item.collectionTime) * 1000,
+  };
+}
+
+// A request to a mini app's host: to the home service as always; while that does not answer, the page and its
+// data from here.
+async function standIn(request, env, source) {
+  let origin = null;
+  try {
+    origin = await within(ORIGIN_TIMEOUT_MS, (signal) => fetch(request, { signal }));
+  } catch {}
+  if (origin && !ORIGIN_DOWN.has(origin.status)) return origin;
+  const { pathname } = new URL(request.url);
+  if (request.method === "GET" && pathname === "/") {
+    await origin?.body?.cancel();
+    return new Response(PAGE_HTML, { headers: { "content-type": "text/html; charset=utf-8", ...NO_CACHE } });
+  }
+  if (request.method === "GET" && pathname === "/api/v1/schedule") {
+    let body = null;
+    try {
+      body = await watcher(env, source).page(source);
+    } catch (e) {
+      console.error(`${source}: page: ${e}`);
+    }
+    if (body) {
+      await origin?.body?.cancel();
+      return new Response(body, { headers: { "content-type": "application/json", ...NO_CACHE } });
+    }
+  }
+  return origin || new Response("dtek-service is away", { status: 503, headers: NO_CACHE });
+}
+
 function watcher(env, source) {
   return env.WATCHER.get(env.WATCHER.idFromName(source), { locationHint: LOCATION_HINT });
 }
@@ -609,8 +769,11 @@ export default {
     if (new Date(now).getUTCHours() === 3 && Math.floor(now / 60000) % 60 === 0) await prune(env, now);
   },
 
-  // The home service's side of the turns (app/edge.py), with EDGE_KEY: POST /home|claim|status|test/<source>.
+  // The mini apps' hosts (standIn), and the home service's side of the turns (app/edge.py), with EDGE_KEY:
+  // POST /home|claim|status|test/<source>.
   async fetch(request, env) {
+    const page = PAGES[new URL(request.url).hostname];
+    if (page) return standIn(request, env, page);
     const match = new URL(request.url).pathname.match(/^\/(home|claim|status|test)\/([a-z]+)$/);
     if (request.method !== "POST" || !match || !SOURCES[match[2]]) return new Response("not found", { status: 404 });
     if (!authorized(request, env)) return new Response("unauthorized", { status: 401 });

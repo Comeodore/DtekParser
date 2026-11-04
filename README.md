@@ -92,7 +92,10 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   decisions up with what Deye recorded.
   `GET 127.0.0.1:9997/plan` shows the current plan, `/health` the loop.
 - **Mini app and API.** Each source's port serves its Telegram mini app and
-  `/api/v1/*`: kem on 9999, krem on 9998.
+  `/api/v1/*`: kem on 9999, krem on 9998. While this service (or the lab) is
+  down, the reserve on Cloudflare serves the same page on the same address
+  with the data of its own last DTEK read (edge/README.md). `app/page.py`
+  builds `/api/v1/schedule` for both.
 - **Real power first, DTEK second (kem).** The kem mini app's headline is
   the power really there: the Home Assistant sensor (kept through a
   websocket drop of up to 2 min), else the building's Deye inverters when

@@ -134,6 +134,7 @@ class DeyeCloud:
         self._session = session
         self._token: Optional[str] = None
         self._token_until = 0.0
+        self._token_expires: Optional[datetime] = None     # wall clock, for the reserve
         self._device_sn = config.device_sn
 
     async def _post(self, path: str, body: dict, token: Optional[str] = None) -> dict:
@@ -160,9 +161,18 @@ class DeyeCloud:
             "password": self._config.password_sha256,
         })
         self._token = data["accessToken"]
-        self._token_until = time.monotonic() + max(0.0, float(data.get("expiresIn") or 0) - self.TOKEN_MARGIN_S)
+        lifetime = max(0.0, float(data.get("expiresIn") or 0) - self.TOKEN_MARGIN_S)
+        self._token_until = time.monotonic() + lifetime
+        self._token_expires = datetime.now(KYIV_TZ) + timedelta(seconds=lifetime)
         logger.info("Deye Cloud token obtained")
         return self._token
+
+    def shared_token(self) -> Optional[tuple[str, datetime]]:
+        """The token in use and until when it is good, for the reserve on Cloudflare (edge/), which reads the
+        building's batteries with it while this service is away; None without one."""
+        if not self._has_token() or self._token_expires is None:
+            return None
+        return self._token, self._token_expires
 
     async def _call(self, path: str, body: dict) -> dict:
         cached = self._has_token()
@@ -251,6 +261,7 @@ class InverterMonitor:
         self._on_messages = on_messages
         self._on_grid = on_grid
         self._grid: Optional[PowerState] = None
+        self.cloud: Optional[DeyeCloud] = None     # set while run() polls
         self._grid_seen = False
         self.latest: Optional[InverterReading] = None
         self.batteries: dict[str, InverterReading] = {}     # by DEYE_BATTERIES name
@@ -294,6 +305,7 @@ class InverterMonitor:
         timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             cloud = DeyeCloud(self.config, session)
+            self.cloud = cloud
             while True:
                 await asyncio.sleep(await self.poll(cloud))
 
@@ -399,6 +411,21 @@ class InverterMonitor:
         if len(fresh) != 1:
             return None
         return Actual(fresh.pop(), None, "deye_batteries")
+
+    def reserve_access(self) -> Optional[dict]:
+        """What the reserve on Cloudflare needs to read DEYE_BATTERIES itself while this service is away, for the
+        mini app it stands in for: the token and the inverters, pushed with DEYE_BATTERIES_SOURCE's baseline."""
+        shared = self.cloud.shared_token() if self.cloud is not None else None
+        if shared is None or not self.config.batteries:
+            return None
+        token, expires = shared
+        return {
+            "token": token,
+            "expires_at": int(expires.timestamp() * 1000),
+            "base_url": self.config.base_url,
+            "batteries": [list(pair) for pair in self.config.batteries],
+            "min_grid_voltage": self.config.min_grid_voltage,
+        }
 
     def batteries_payload(self, now: datetime) -> list[dict]:
         """DEYE_BATTERIES in their configured order, for the batteries row of their source's mini app."""

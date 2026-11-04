@@ -51,6 +51,19 @@ at the address with its changes. Power going off or coming back stays with the h
   ("Стабілізаційне відключення (Згідно графіку…)") is no message of the home service: the mini app
   shows it. While the reserve is in charge, kem's chats get it as text too: its start, a new end
   and its end (`scheduled_notices` in `SOURCES`, worker.js). krem stays as at home.
+- **The mini app, stood in for (05.11.2026).** `dtek-schedule.comeodore.services` (kem) and
+  `dtek-krem-schedule.comeodore.services` (krem) are Worker routes to this worker. Every request goes
+  on to the home service through the tunnel as before; only when that answers 530 (no tunnel), 502–504
+  or 520–524, or not within 8 s, `/` is the same page (app/static/index.html, uploaded with the
+  worker as a Text module) and `/api/v1/schedule` comes from here: dtek-brain's `page` builds it from
+  the last good read (kept as `house`, `read_at`), with `reserve: true`, which the page shows as a
+  note with the time of that read. For kem it also has the power really there and the batteries row:
+  the Victron from svitlo-edge (its `Power` entrypoint, over the `POWER` service binding: grid, since
+  when, SOC and battery power from VRM, read there every 30 s) and the building's Deye inverters
+  (Elevator, Water), read from Deye Cloud at most once a minute with the token the home service
+  pushes with kem's baseline (`deye` in the push, app/edge.py), so they appear only once the home
+  service has pushed it. krem's page has the schedule and DTEK's status, without the inverter diagram.
+  One dtek-brain call serves the page for 20 s.
 - **Nothing piles up.** dtek-service now drops DTEK's news it could not deliver within 15
   minutes (`EVENT_TTL`) instead of 6 hours: after an outage its next cycle reports the difference
   as it is then.

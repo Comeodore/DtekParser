@@ -90,6 +90,9 @@ class Service:
                 on_grid=lambda t: self.reserve.fire("grid", "back" if t.status is PowerStatus.ON else "lost"),
                 grid_day_path=os.path.join(settings.state_dir, f"grid-day-{settings.deye.source}.json"),
             )
+            if self.edge is not None:
+                inverter, shown_with = self.inverter, settings.deye.batteries_source
+                self.edge.deye = lambda source: inverter.reserve_access() if source == shown_with else None
         self._tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:

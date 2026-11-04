@@ -709,6 +709,7 @@
                 voluntary: 'Ask the building management for the outage schedule.',
                 otherOperator: 'Power at this address is managed by another operator.',
                 stale: 'Data may be outdated, last successful update',
+                reserve: 'The home server is off: a backup in the cloud reads DTEK every 5 minutes, last at',
                 loadError: '⚠️ Load error',
                 grid: 'Grid',
                 gridOn: 'On',
@@ -783,6 +784,7 @@
                 voluntary: 'Графік відключень уточнюйте в ОСББ/ЖЕК/керуючій компанії.',
                 otherOperator: 'Електропостачання за цією адресою забезпечує інша компанія.',
                 stale: 'Дані можуть бути застарілими, останнє оновлення',
+                reserve: 'Домашній сервер вимкнено: резерв у хмарі зчитує ДТЕК кожні 5 хвилин, востаннє о',
                 loadError: '⚠️ Помилка',
                 grid: 'Мережа',
                 gridOn: 'Є',
@@ -1208,13 +1210,18 @@
             $('noticeCard').textContent = notes.join(' ');
             $('noticeCard').classList.toggle('hidden', !notes.length);
 
+            // `reserve`: the page and its data come from the reserve on Cloudflare while the home server is away.
             const stale = !data.healthy && data.updated_at;
+            const locale = state.lang === 'uk' ? 'uk-UA' : 'en-GB';
             if (stale) {
-                const when = new Date(data.updated_at).toLocaleString(state.lang === 'uk' ? 'uk-UA' : 'en-GB',
+                const when = new Date(data.updated_at).toLocaleString(locale,
                     { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
                 $('staleCard').textContent = `${t('stale')}: ${when}`;
+            } else if (data.reserve && data.updated_at) {
+                const when = new Date(data.updated_at).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
+                $('staleCard').textContent = `${t('reserve')} ${when}`;
             }
-            $('staleCard').classList.toggle('hidden', !stale);
+            $('staleCard').classList.toggle('hidden', !stale && !(data.reserve && data.updated_at));
         };
 
         const fetchData = async () => {

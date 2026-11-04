@@ -276,3 +276,28 @@ def test_metrics_are_stamped_with_the_loggers_time():
     assert samples['deye_grid_tariff_today_kwh{source="krem",tariff="night"}'] == (2.5, ms)
     assert samples['deye_grid_tariff_today_kwh{source="krem",tariff="day"}'] == (5.5, ms)
     assert http.get("/metrics", headers={"cf-connecting-ip": "203.0.113.7"}).status_code == 404
+
+
+class SharedToken:
+    def __init__(self, shared):
+        self.shared = shared
+
+    def shared_token(self):
+        return self.shared
+
+
+def test_reserve_reads_the_batteries_with_the_token_in_use():
+    monitor = InverterMonitor(load_settings({**BASE_ENV, **DEYE_ENV, **BATTERIES_ENV}).deye)
+    # Not polling yet, or no token yet: nothing to hand over.
+    assert monitor.reserve_access() is None
+    monitor.cloud = SharedToken(None)
+    assert monitor.reserve_access() is None
+    monitor.cloud = SharedToken(("tok", kyiv(2026, 12, 1)))
+    access = monitor.reserve_access()
+    assert access["token"] == "tok" and access["expires_at"] == int(kyiv(2026, 12, 1).timestamp() * 1000)
+    assert access["batteries"] == [list(pair) for pair in monitor.config.batteries]
+    assert access["min_grid_voltage"] == monitor.config.min_grid_voltage
+    # Without building inverters there is nothing for the reserve to read.
+    alone = InverterMonitor(deye_config())
+    alone.cloud = SharedToken(("tok", kyiv(2026, 12, 1)))
+    assert alone.reserve_access() is None
