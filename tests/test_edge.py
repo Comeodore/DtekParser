@@ -49,14 +49,25 @@ def pipeline(settings):
     return collector, site, store, clock, edge
 
 
-def reserve_read(site, push, now):
+def reserve_read(site, push, now, **extra):
     """One read of the reserve, as worker.js hands it to dtek-brain."""
     return brain.process({
         "source": "kem", "now": int(now.timestamp() * 1000), "building": "43",
         "answer": copy.deepcopy(site.answer), "fact": copy.deepcopy(site.fact), "names": {"GPV4.1": "Черга 4.1"},
         "baseline": push["baseline"], "fingerprint": push["fingerprint"],
-        "lang": push["lang"], "notify_outages": push["notify_outages"],
+        "lang": push["lang"], "notify_outages": push["notify_outages"], **extra,
     })
+
+
+def reserve_reads(site, push):
+    """The reserve in charge: each read goes on from the baseline and the days shown of the one before."""
+    state = {"baseline": push["baseline"], "shown": []}
+
+    def read(now):
+        reply = reserve_read(site, dict(push, baseline=state["baseline"]), now, shown=state["shown"])
+        state.update(baseline=reply["baseline"], shown=reply["shown"])
+        return reply
+    return read
 
 
 async def test_every_good_cycle_pushes_the_baseline_bot_and_chats(pipeline):
@@ -128,6 +139,64 @@ async def test_brain_initialises_without_a_baseline():
     reply = reserve_read(site, {"baseline": None, "fingerprint": "f", "lang": "en", "notify_outages": True},
                          kyiv(2026, 10, 1, 18))
     assert reply["initialized"] and reply["texts"] == [] and reply["baseline"]["fingerprint"] == "f"
+    # Without the days shown the worker keeps, it sends only what changed, as before.
+    assert "shown" not in reply
+
+
+async def test_reserve_in_charge_shows_the_schedule_once(pipeline):
+    collector, site, _, _, edge = pipeline
+    site.fact = fact("01.10.2026 06:50", {DAY_OCT1: {"GPV4.1": hours(19, 20)}})
+    await collector.cycle()
+    read = reserve_reads(site, edge.calls[-1][2])
+    # Taken over with nothing changed: today as it is, since the mini app is down with the service.
+    assert read(kyiv(2026, 10, 1, 18, 10))["texts"] == ["📅 <b>Today's schedule</b> (01.10)\n\n🔴 19:00 – 21:00"]
+    # Then nothing until it changes; hours going by are no news.
+    assert read(kyiv(2026, 10, 1, 18, 15))["texts"] == []
+    assert read(kyiv(2026, 10, 1, 20, 15))["texts"] == []
+
+
+async def test_reserve_sends_a_day_with_news_once(pipeline):
+    collector, site, _, _, edge = pipeline
+    await collector.cycle()
+    read = reserve_reads(site, edge.calls[-1][2])
+    assert read(kyiv(2026, 10, 1, 18, 10))["texts"] == ["📅 <b>Today's schedule</b> (01.10)\n\n✅ No more outages today"]
+    site.fact = fact("01.10.2026 19:40", {DAY_OCT1: {"GPV4.1": hours()}, DAY_OCT2: {"GPV4.1": hours(8, 9)}})
+    reply = read(kyiv(2026, 10, 1, 19, 45))
+    assert reply["texts"] == [PUBLISHED]
+    assert [d["date"] for d in reply["shown"]] == ["2026-10-01", "2026-10-02"]
+    # Past midnight tomorrow is today, and was shown already.
+    assert read(kyiv(2026, 10, 2, 0, 5))["texts"] == []
+
+
+async def test_reserve_shows_tomorrow_published_without_outages(pipeline):
+    collector, site, _, _, edge = pipeline
+    await collector.cycle()
+    read = reserve_reads(site, edge.calls[-1][2])
+    read(kyiv(2026, 10, 1, 18, 10))
+    site.fact = fact("01.10.2026 19:40", {DAY_OCT1: {"GPV4.1": hours()}, DAY_OCT2: {"GPV4.1": hours()}})
+    reply = read(kyiv(2026, 10, 1, 19, 45))
+    # Not news to the detector, but the mini app would have shown it.
+    assert reply["events"] == []
+    assert reply["texts"] == ["📅 <b>Tomorrow's schedule</b> (02.10)\n\n✅ No outages planned"]
+
+
+async def test_reserve_shows_the_schedule_once_it_applies_again(pipeline):
+    """04.11.2026 at kem: DTEK published the day during an emergency without schedules, which then became a
+    stabilisation outage by the schedule; nothing was sent, and the mini app was down."""
+    collector, site, _, _, edge = pipeline
+    house = site.answer["data"]["43"]
+    house.update(type="2", start_date="11:35 30.09.2026", end_date="20:00 01.10.2026",
+                 sub_type="Екстренні відключення (Аварійне без застосування графіку погодинних відключень)")
+    await collector.cycle()
+    read = reserve_reads(site, edge.calls[-1][2])
+    site.fact = fact("01.10.2026 19:40", {DAY_OCT1: {"GPV4.1": hours(21, 22)}})
+    # While schedules do not apply, none is sent.
+    assert read(kyiv(2026, 10, 1, 19, 45))["texts"] == []
+    house.update(start_date="20:23 01.10.2026", end_date="23:00 01.10.2026",
+                 sub_type="Стабілізаційне відключення (Згідно графіку погодинних відключень)")
+    reply = read(kyiv(2026, 10, 1, 20, 30))
+    assert reply["events"] == ["outage started"]
+    assert reply["texts"] == ["📅 <b>Today's schedule</b> (01.10)\n\n🔴 21:00 – 23:00"]
 
 
 def test_dtek_news_expires_sooner_than_power_messages(settings):

@@ -1,9 +1,10 @@
-# cf-watch: the reserve of dtek-service on Cloudflare
+# dtek-edge: the reserve of dtek-service on Cloudflare
 
-The schedules keep coming when the homelab is off: `dtek-watch-test` reads DTEK from a
+The schedules keep coming when the homelab is off: `dtek-edge` reads DTEK from a
 Cloudflare Worker, without a browser, and while the home service is away it messages that
 service's chats with DTEK's news in its place, through the same bots and in the same words. It
-started on 01.11.2026 as a test that only read, and has been the reserve since 02.11.2026.
+started on 01.11.2026 as a test that only read (as `dtek-watch-test`, in `cf-watch/`), and has been the
+reserve since 02.11.2026; renamed `dtek-edge` on 04.11.2026.
 
 Since 02.11.2026 it polls the way airdanger's edge does: a Durable Object (`Watcher`, one per
 source, kem and krem) reads, then sets its alarm for the next read 5 minutes later. The cron
@@ -37,6 +38,15 @@ at the address with its changes. Power going off or coming back stays with the h
   started) first asks the worker (`POST /claim/<source>`). If the reserve took over meanwhile,
   the worker hands over the baseline it went on with and stops; the home service detects from
   that baseline, so what the reserve sent is not sent again and only later news follows.
+- **The schedules themselves.** While the home service runs, its mini app shows today's and
+  tomorrow's schedules; it is down with it. So while the reserve is in charge, the chats also get
+  the schedules as text ("Графік на сьогодні" / "Today's schedule") whenever they have not seen
+  them as they are: on taking a source over, when schedules apply again after an emergency
+  without them, and when tomorrow is published with no outages. A day DTEK changed is already in
+  its "оновлено" message and is not sent twice. What the chats were shown (`shown`) is kept apart
+  from the turn, so a home service that comes and goes does not make the reserve repeat it. Added
+  on 04.11.2026, after kem's emergency without schedules turned into an outage by the schedule at
+  11:09 and the kem chats, with the lab off, had no way to see the day.
 - **Nothing piles up.** dtek-service now drops DTEK's news it could not deliver within 15
   minutes (`EVENT_TTL`) instead of 6 hours: after an outage its next cycle reports the difference
   as it is then.
@@ -47,8 +57,8 @@ service is alive and can message Telegram but cannot reach `workers.dev` for 5 m
 
 `MODE=test` runs the reserve on every read regardless of the home service, from a baseline of
 its own, and sends only to `TEST_CHAT_ID`, marked "🧪 reserve". `POST /test/<source>` with
-`{"forget": "days" | "outage" | "all"}` makes it forget what the home service has seen, so the
-next read (at once) reports the current state as news. `POST /status/<source>` shows the last
+`{"forget": "days" | "outage" | "shown" | "all"}` makes it forget what the home service has seen
+(or the schedules it showed), so the next read (at once) reports the current state as news. `POST /status/<source>` shows the last
 push (age, chats, language), the reserve's turn and the outbox; all endpoints take
 `Authorization: Bearer <EDGE_KEY>`, the key in the home `.env`. Tested on 02.11.2026: both bots
 delivered to the owner's chat, kem's emergency notice in English and krem's day in Ukrainian.
@@ -133,7 +143,7 @@ operations of that kind fail until midnight UTC, for airdanger too. airdanger as
 30.10-01.11.2026; the reserve as estimated for kem and krem every 5 minutes, with the home
 service pushing each about once a minute.
 
-| Limit (Free) | airdanger | dtek-watch-test + dtek-brain |
+| Limit (Free) | airdanger | dtek-edge + dtek-brain |
 | --- | --- | --- |
 | Worker requests, 100,000 | ~1,450 (edge cron) | ~3,000 (2 × 1,440 pushes, cron every 10 minutes, dtek-brain while in reserve) |
 | Durable Objects duration, 13,000 GB-s | ~11,000 (Poller active all day) | ~30 (0.34 s active per read, 2 × 288 reads; the pushes a few ms each) |
@@ -157,8 +167,9 @@ in their snapshot; that brought a call down to 5-9 ms.
 
 ## Reading the results
 
-In the dashboard, D1 > `dtek-watch-test` > Console, or with
-`npx wrangler d1 execute dtek-watch-test --remote --command "<SQL>"`.
+In the dashboard, D1 > `dtek-edge` > Console, or with
+`npx wrangler d1 execute dtek-edge --remote --command "<SQL>"`. Everything from before the rename
+was copied over; the D1 `dtek-watch-test` holds the same up to 04.11.2026 11:31 Kyiv time.
 
 Last runs (`mode`: `home` while the home service is in charge, `reserve` while the worker is;
 `home_age`: seconds since the last push):
@@ -198,7 +209,7 @@ WHERE colo IS NOT NULL ORDER BY at DESC LIMIT 24;
 ```
 
 CPU per read is in Workers Observability (`$workers.cpuTimeMs` on the `alarm` events of
-`dtek-watch-test`). The data center of cron runs is the `coloCode` dimension of the GraphQL
+`dtek-edge`). The data center of cron runs is the `coloCode` dimension of the GraphQL
 `workersInvocationsAdaptive` dataset.
 
 ## Pausing and removing it
@@ -213,10 +224,25 @@ but never takes a source over (claims then always answer that it did not). Remov
 and `EDGE_KEY` from the home `.env` stops the pushes; the worker, with `MODE=live`, would then
 take both sources over after 5 minutes, so set `MODE=off` first.
 
-To remove everything, delete the Workers `dtek-watch-test` (with its Durable Object namespace)
-and `dtek-brain`, the D1 database `dtek-watch-test` (`npx wrangler delete` and
-`npx wrangler d1 delete dtek-watch-test`), and `EDGE_URL`/`EDGE_KEY` from the home `.env`.
+To remove everything, delete the Workers `dtek-edge` (with its Durable Object namespace) and
+`dtek-brain`, the D1 database `dtek-edge` (`npx wrangler delete` and
+`npx wrangler d1 delete dtek-edge`), and `EDGE_URL`/`EDGE_KEY` from the home `.env`.
 
-To update dtek-brain after a change in the app modules it uses: `python cf-watch/bundle.py out.json`,
+## The rename (04.11.2026)
+
+`dtek-watch-test` was renamed in place (`PATCH /workers/workers/<id>` with the new name): the
+Worker's id, its Durable Object namespace with all its storage (cookies, the last push, the turn,
+the outbox), the cron and the secrets stayed; only the `workers.dev` address changed. The
+namespace keeps its old name, `dtek-watch-test_Watcher`. The D1 database cannot be renamed, so
+`dtek-edge` is a copy that the binding now points to.
+
+The home service's `EDGE_URL` still points to the old address, so a Worker named
+`dtek-watch-test` stays there and only forwards every request to `dtek-edge` through a service
+binding. The lab was off at the time, so `.env` could not be changed. Without it, the home
+service could not claim the sources back, and both would message the chats. Once `EDGE_URL` is
+`https://dtek-edge.maksymchuk-vladimir.workers.dev` and dtek-service is restarted, delete the
+forwarder (Worker `dtek-watch-test`) and the old D1 database `dtek-watch-test`.
+
+To update dtek-brain after a change in the app modules it uses: `python edge/bundle.py out.json`,
 then upload every file in it as a `text/x-python` module with `main_module` `worker.py` and the
 flags `python_workers` and `disable_python_external_sdk`, before worker.js if both change.

@@ -2,7 +2,9 @@ from datetime import date
 
 from app.dtek.models import Outage, OutageKind
 from app.engine.events import OutageChange, OutageEvent, ScheduleChange, ScheduleEvent
-from app.notify.messages import next_outage_text, render_outage, render_power, render_schedule, scheduled_end
+from app.notify.messages import (
+    next_outage_text, render_days, render_outage, render_power, render_schedule, scheduled_end,
+)
 from app.power.state import PowerStatus, PowerTransition
 from tests.conftest import day, emergency, kyiv, one, slots, snapshot
 
@@ -49,6 +51,13 @@ def test_period_running_past_midnight():
     text = render_schedule(ScheduleEvent(OCT1, ScheduleChange.CHANGED, today, None),
                            snapshot([today, tomorrow]), kyiv(2026, 10, 1, 20), "en")
     assert "🔴 22:00 – 02:00 (tomorrow)" in text
+
+
+def test_days_as_they_are_today_from_now_and_tomorrow_whole():
+    today, tomorrow = one(OCT1, [9, 17, 18]), one(OCT2)
+    text = render_days([today, tomorrow], snapshot([today, tomorrow]), kyiv(2026, 10, 1, 12), "uk")
+    assert text == ("📅 <b>Графік на сьогодні</b> (01.10)\n\n🔴 17:00 – 19:00\n\n"
+                    "📅 <b>Графік на завтра</b> (02.10)\n\n✅ Відключень не заплановано")
 
 
 def test_emergency_started_escapes_dtek_text():

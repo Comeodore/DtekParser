@@ -1,7 +1,7 @@
 """Packs dtek-brain for upload: brain.py as worker.py, the Europe/Kyiv tz file, and every app module that
 app/brain.py imports (found by importing it, so the list cannot fall behind the code).
 
-    python cf-watch/bundle.py <out.json>
+    python edge/bundle.py <out.json>
 
 Writes {"files": {path: text}, "hashes": {path: sha256[:16]}} and prints the hashes.
 """
@@ -36,7 +36,7 @@ def kyiv_tzif() -> str:
 
 
 def main() -> None:
-    files = {"worker.py": (ROOT / "cf-watch" / "brain.py").read_text(), "kyiv_tzif.py": kyiv_tzif()}
+    files = {"worker.py": (ROOT / "edge" / "brain.py").read_text(), "kyiv_tzif.py": kyiv_tzif()}
     for name in app_modules():
         path = module_path(name)
         files[path] = (ROOT / path).read_text()

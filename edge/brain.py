@@ -34,6 +34,7 @@ def warm_up() -> None:
         "answer": {"result": True, "updateTimestamp": "01.10.2026 07:00", "data": {"1": house}},
         "fact": {"update": "01.10.2026 07:00", "today": day, "data": {str(day): {"GPV1.1": hours}}},
         "names": {"GPV1.1": "Черга 1.1"}, "baseline": None, "fingerprint": "-", "lang": "uk", "notify_outages": True,
+        "shown": [],
     }
     first = brain.process(json.loads(json.dumps(request)))
     for lang in ("uk", "en"):

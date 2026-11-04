@@ -1,13 +1,14 @@
-// dtek-watch-test, deployed through the Cloudflare API (01.11.2026, as the reserve 02.11.2026);
+// dtek-edge (dtek-watch-test until 04.11.2026), deployed through the Cloudflare API (01.11.2026, as the reserve
+// 02.11.2026);
 // `npx wrangler deploy` from this folder gives the same Worker. Secrets, set once with
 // `npx wrangler secret put <NAME>`: the addresses KEM_STREET KEM_BUILDING KREM_SETTLEMENT KREM_STREET
 // KREM_BUILDING, and EDGE_KEY, the key the home service sends (its EDGE_KEY in .env).
 // dtek-brain (brain.py) is a Python Worker of its own, uploaded from what bundle.py packs; deploy it first.
 {
-  "name": "dtek-watch-test",
+  "name": "dtek-edge",
   "main": "worker.js",
   "compatibility_date": "2026-10-01",
-  // The home service pushes to https://dtek-watch-test.maksymchuk-vladimir.workers.dev.
+  // The home service pushes to https://dtek-edge.maksymchuk-vladimir.workers.dev.
   "workers_dev": true,
   "observability": { "enabled": true },
   // live: takes a source over while the home service is away; test: runs the reserve always, to TEST_CHAT_ID only.
@@ -20,8 +21,8 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "dtek-watch-test",
-      "database_id": "ca89cc90-f2c2-4828-a542-9e2a6a256bae"
+      "database_name": "dtek-edge",
+      "database_id": "b9ec3211-81ab-4251-b9cd-bceb03fefe13"
     }
   ]
 }

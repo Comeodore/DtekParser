@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Undelivered messages older than this are dropped rather than sent stale.
 MESSAGE_TTL = timedelta(hours=6)
 # DTEK's own news is not kept that long: once the service is back, its next cycle reports the difference as it
-# is then, and the reserve on Cloudflare (cf-watch/) has covered the time in between.
+# is then, and the reserve on Cloudflare (edge/) has covered the time in between.
 EVENT_TTL = timedelta(minutes=15)
 # Outage notices worth a message; schedule-driven ones are covered by schedule messages.
 NOTIFIABLE_KINDS = (OutageKind.EMERGENCY, OutageKind.PLANNED)

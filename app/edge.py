@@ -1,4 +1,4 @@
-"""The reserve on Cloudflare (cf-watch/): it reads DTEK on its own and messages the chats while this service is away.
+"""The reserve on Cloudflare (edge/): it reads DTEK on its own and messages the chats while this service is away.
 
 The two take turns and never message a source's chats at the same time. After each good cycle a source pushes
 its baseline, bot and chats to the reserve; the pushes are also how the reserve knows the service is alive, and

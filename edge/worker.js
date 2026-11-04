@@ -1,4 +1,4 @@
-// dtek-watch-test: the reserve of dtek-service. It reads the DTEK schedules from a Cloudflare Worker, without a
+// dtek-edge: the reserve of dtek-service. It reads the DTEK schedules from a Cloudflare Worker, without a
 // browser, and while the home service is away it messages that service's chats in its place.
 //
 // Why no browser is needed: Incapsula challenges only the HTML page. POST /ua/ajax reaches the
@@ -21,6 +21,10 @@
 //   texts go to the same chats through the same bot;
 // - a home service that is back claims the source (POST /claim/<source>) before it detects anything and gets
 //   the baseline the reserve went on with, so nothing is sent twice.
+// While the reserve is in charge it also sends today's and tomorrow's schedules as they are whenever the chats
+// have not seen them yet (taking over, schedules applying again, tomorrow published with no outages): the mini
+// app that otherwise shows them is down with the home service. What the chats were shown is kept apart from
+// the turn (`shown`), so a home service that comes and goes does not make it send the same again.
 // MODE=test runs the reserve on every read from a baseline of its own and sends only to TEST_CHAT_ID, marked,
 // without taking the turn from the home service; any other MODE only reads.
 //
@@ -48,6 +52,8 @@ const LEASE_MIN = 5;
 const MESSAGE_TTL_MIN = 15;
 // Messages sent per run, each a subrequest of its own.
 const SEND_PER_RUN = 3;
+// Where each turn keeps the days the chats were shown as they are (dtek-brain's `shown`).
+const SHOWN = { reserve: "shown", shadow: "shadow_shown" };
 // Asked for Eastern Europe; the kem object was still placed in Frankfurt. It stays there either way.
 const LOCATION_HINT = "eeur";
 // Where the object runs and the address it goes out from, logged once an hour.
@@ -286,7 +292,7 @@ export class Watcher extends DurableObject {
 
   // POST /status/<source>: what this side knows, for checks; never the token.
   async status() {
-    const got = await this.ctx.storage.get(["home", "reserve", "shadow", "outbox", "strikes", "next_read", "fact_update", "fact"]);
+    const got = await this.ctx.storage.get(["home", "reserve", "shadow", "outbox", "strikes", "next_read", "fact_update", "fact", "shown", "shadow_shown"]);
     const home = got.get("home");
     const turn = (state) => state && { since: state.since, updated_at: state.updated_at, queued: state.queued };
     return {
@@ -302,6 +308,8 @@ export class Watcher extends DurableObject {
       },
       reserve: turn(got.get("reserve")),
       shadow: turn(got.get("shadow")),
+      shown: (got.get("shown") || []).map((d) => d.date),
+      shadow_shown: (got.get("shadow_shown") || []).map((d) => d.date),
       outbox: (got.get("outbox") || []).length,
       strikes: got.get("strikes") || 0,
       next_read: got.get("next_read") || null,
@@ -311,7 +319,8 @@ export class Watcher extends DurableObject {
   }
 
   // POST /test/<source>, MODE=test only: the shadow reserve forgets what the home service has seen ("days",
-  // "outage" or "all") and reads at once, so the read reports it to TEST_CHAT_ID as news.
+  // "outage" or "all") or the schedules it showed ("shown", also in "all") and reads at once, so the read
+  // reports it to TEST_CHAT_ID as news.
   async test(source, body) {
     if (this.mode() !== "test") return { error: "MODE is not test" };
     const home = await this.ctx.storage.get("home");
@@ -319,6 +328,7 @@ export class Watcher extends DurableObject {
     const baseline = structuredClone(home.baseline);
     if (body.forget === "days" || body.forget === "all") Object.assign(baseline, { days: [], absent: {} });
     if (body.forget === "outage" || body.forget === "all") Object.assign(baseline, { outage: null, clear_streak: 0 });
+    if (body.forget === "shown" || body.forget === "all") await this.ctx.storage.delete("shadow_shown");
     await this.ctx.storage.put({ shadow: { since: Date.now(), baseline, queued: 0 }, next_read: 0 });
     await this.ctx.storage.setAlarm(Date.now() + 500);
     return { ok: true, forgot: body.forget || "nothing" };
@@ -476,17 +486,21 @@ export class Watcher extends DurableObject {
     if (mode === "test" && !this.env.TEST_CHAT_ID) return { mode, error: "TEST_CHAT_ID is not set" };
     return this.ctx.blockConcurrencyWhile(async () => {
       try {
-        const got = await this.ctx.storage.get(["home", "reserve", "shadow", "outbox"]);
+        const got = await this.ctx.storage.get(["home", "reserve", "shadow", "outbox", ...Object.values(SHOWN)]);
         const home = got.get("home");
         if (!home) return { mode: "no push" };
         const homeAge = Math.round((now - home.at) / 1000);
         if (mode === "live" && homeAge < LEASE_MIN * 60) return { mode: "home", home_age: homeAge };
         const key = mode === "live" ? "reserve" : "shadow";
         const state = got.get(key);
-        // The same fact, house and day as the last time leave the baseline as it was: dtek-brain is asked only
-        // when something changed, since a cold call of it costs well over the 10 ms of CPU.
+        const shown = got.get(SHOWN[key]);
+        // The same fact, house and day as the last time leave the baseline and what was shown as they were:
+        // dtek-brain is asked only when something changed, since a cold call of it costs well over the 10 ms of
+        // CPU. Nothing shown yet (a new turn, or the first read since this was deployed) asks it as well.
         const input = `${fact.update}|${KYIV_DATE.format(now)}|${JSON.stringify(house)}`;
-        if (state && state.input === input && !confirming(state.baseline)) return { mode: key, home_age: homeAge };
+        if (state && state.input === input && !confirming(state.baseline) && shown !== undefined) {
+          return { mode: key, home_age: homeAge };
+        }
         const forBrain = forHouse(fact, names, house.sub_type_reason || []);
         const reply = JSON.parse(
           await this.env.BRAIN.process(
@@ -501,6 +515,7 @@ export class Watcher extends DurableObject {
               fingerprint: home.fingerprint,
               lang: home.lang,
               notify_outages: home.notify_outages,
+              shown: shown || [],
             }),
           ),
         );
@@ -514,6 +529,7 @@ export class Watcher extends DurableObject {
         if (!state) console.warn(`${source}: the ${key} takes over; last push ${homeAge} s ago`);
         await this.ctx.storage.put({
           [key]: { since: state ? state.since : now, baseline: reply.baseline, input, updated_at: now, queued: (state?.queued || 0) + queued },
+          [SHOWN[key]]: reply.shown || [],
           outbox,
         });
         return { mode: key, home_age: homeAge, events: reply.events.length, queued };
