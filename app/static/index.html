@@ -661,6 +661,16 @@
         'use strict';
 
         const API_ENDPOINT = '/api/v1/schedule';
+        // While the home server does not answer (the tunnel or the server down), the same data from the reserve on
+        // Cloudflare (edge/worker.js), which also serves this page then. Only the page itself goes through the
+        // reserve's Worker; asking the home server goes straight through the tunnel and costs the reserve nothing.
+        const RESERVE_API = {
+            'dtek-schedule.comeodore.services': 'https://dtek-edge.maksymchuk-vladimir.workers.dev/page/kem',
+            'dtek-krem-schedule.comeodore.services': 'https://dtek-edge.maksymchuk-vladimir.workers.dev/page/krem',
+        }[location.hostname];
+        // What Cloudflare answers for a tunnel or origin that is down (as ORIGIN_DOWN in edge/worker.js).
+        const HOME_DOWN = [502, 503, 504, 520, 521, 522, 523, 524, 530];
+        const HOME_TIMEOUT = 8000;
         const REFRESH_INTERVAL = 10000;
         // While the reserve on Cloudflare answers (`reserve`), once a minute: its data changes no faster (DTEK
         // every 5 min, the power and Deye about once a minute), and its requests count against a daily limit.
@@ -1228,11 +1238,28 @@
             $('staleCard').classList.toggle('hidden', !stale && !(data.reserve && data.updated_at));
         };
 
+        // The home server's data, else the reserve's while the home server does not answer.
+        const loadSchedule = async () => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), HOME_TIMEOUT);
+            try {
+                const res = await fetch(`${API_ENDPOINT}?_t=${Date.now()}`, { signal: controller.signal });
+                if (res.ok) return await res.json();
+                if (!RESERVE_API || !HOME_DOWN.includes(res.status)) throw new Error(`HTTP ${res.status}`);
+            } catch (err) {
+                // No answer at all (a network error, or none within HOME_TIMEOUT) is the home server down too.
+                if (!RESERVE_API || !(err instanceof TypeError || err.name === 'AbortError')) throw err;
+            } finally {
+                clearTimeout(timer);
+            }
+            const res = await fetch(`${RESERVE_API}?_t=${Date.now()}`);
+            if (!res.ok) throw new Error(`reserve HTTP ${res.status}`);
+            return res.json();
+        };
+
         const fetchData = async () => {
             try {
-                const res = await fetch(`${API_ENDPOINT}?_t=${Date.now()}`);
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                const data = await res.json();
+                const data = await loadSchedule();
                 state.reserve = Boolean(data.reserve);
 
                 state.lang = data.lang || 'en';

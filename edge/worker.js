@@ -34,12 +34,13 @@
 // MODE=test runs the reserve always, from a baseline of its own, and sends only to TEST_CHAT_ID, marked, without
 // taking the turn from the home service; any other MODE only reads while the home service is away.
 //
-// The mini apps' addresses (dtek-schedule / dtek-krem-schedule.comeodore.services, Cloudflare Tunnel to the home
-// service) are routed through here too. Every request goes on to the home service as before; only when it does not
-// answer (the tunnel or the service down) the page and its /api/v1/schedule come from here instead: the same
-// index.html, with data dtek-brain builds from the object's last read (in D1), and for kem the Victron as VRM has
-// it and the building's Deye inverters, for krem the inverter diagram. A page served here also has the cron and the
-// object read for it for PAGE_WANTED_MIN, in case the home service is alive and only the tunnel is down.
+// The mini apps' pages (dtek-schedule / dtek-krem-schedule.comeodore.services/, Cloudflare Tunnel to the home
+// service) are routed through here, the page alone: its requests for data go straight to the home service and cost
+// nothing here. A page goes on to the home service as before; only when that does not answer (the tunnel or the
+// service down) the same index.html comes from here, and the page, finding the home server down, asks GET
+// /page/<source> here for data dtek-brain builds from the object's last read (in D1): for kem with the Victron as
+// VRM has it and the building's Deye inverters, for krem the inverter diagram. A page served here also has the cron
+// and the object read for it for PAGE_WANTED_MS, in case the home service is alive and only the tunnel is down.
 //
 // Budget on Workers Free (see README.md): while the home service is alive, no Durable Object time or requests at
 // all; ~2,900 Worker requests and D1 writes a day for the pushes and 1,440 cron runs. While it is away: a read every
@@ -86,7 +87,7 @@ const WATCHED = ["kem", "krem"];
 // What Cloudflare answers for a tunnel or origin that is down: 530 is error 1033, no tunnel connected.
 const ORIGIN_DOWN = new Set([502, 503, 504, 520, 521, 522, 523, 524, 530]);
 const ORIGIN_TIMEOUT_MS = 8 * 1000;
-// The page asks once a minute while its answers carry `reserve`; one dtek-brain call serves it this long.
+// The page asks for its data once a minute while the answers carry `reserve`; one dtek-brain call serves it this long.
 const PAGE_CACHE_MS = 20 * 1000;
 // A page served here has the cron and the object read for it this long, and marks itself at most this often.
 const PAGE_WANTED_MS = 10 * 60 * 1000;
@@ -1071,17 +1072,16 @@ async function judgePower(env, source, home, edge, observed, now, writes) {
 
 // --- The mini apps ---
 
-// The mini app's /api/v1/schedule while the home service's own is down: dtek-brain's page from the object's last good
-// read, with the Victron and the Deye inverters where the source has them, all from D1. A JSON string, or null before
-// the first good read. Each ask marks the page wanted, so the cron and the object read for it.
+// The mini app's data while the home service's own is down (GET /page/<source>, which the page asks once the home
+// server does not answer): dtek-brain's page from the object's last good read, with the Victron and the Deye
+// inverters where the source has them, all from D1. A JSON string, or null before the first good read.
 async function pageBody(env, source, now) {
   const [edgeRow, homeRow, kvRows] = await env.DB.batch([
-    env.DB.prepare("SELECT read, power, page_at FROM edge WHERE source = ?").bind(source),
+    env.DB.prepare("SELECT read, power FROM edge WHERE source = ?").bind(source),
     env.DB.prepare("SELECT body FROM home WHERE source = ?").bind(source),
     env.DB.prepare("SELECT name, value FROM kv WHERE name IN ('victron', 'deye')"),
   ]);
   const edge = edgeRow.results[0] || {};
-  if (!(edge.page_at > now - PAGE_MARK_MS)) await setEdge(env, source, { page_at: now }).run();
   const read = json(edge.read);
   if (!read) return null;
   const push = json(homeRow.results[0]?.body) || {};
@@ -1117,8 +1117,10 @@ async function pageBody(env, source, now) {
   );
 }
 
-// A request to a mini app's host: to the home service as always; while that does not answer, the page and its
-// data from here.
+// A request for a mini app's page (the routes cover `/` alone): to the home service as always; while that does not
+// answer, the same page from here, which then asks GET /page/<source> for its data (app/static/index.html). Served
+// from here, the page is marked wanted, so the cron and the object read for it for PAGE_WANTED_MS (in case the home
+// service is alive and only the tunnel is down); only this marks it, so nothing on workers.dev can wake a read.
 async function standIn(request, env, source) {
   let origin = null;
   try {
@@ -1126,27 +1128,36 @@ async function standIn(request, env, source) {
   } catch {}
   if (origin && !ORIGIN_DOWN.has(origin.status)) return origin;
   const { pathname } = new URL(request.url);
-  if (request.method === "GET" && pathname === "/") {
-    await origin?.body?.cancel();
-    return new Response(PAGE_HTML, { headers: { "content-type": "text/html; charset=utf-8", ...NO_CACHE } });
+  if (request.method !== "GET" || pathname !== "/") return origin || new Response("dtek-service is away", { status: 503, headers: NO_CACHE });
+  await origin?.body?.cancel();
+  try {
+    const now = Date.now();
+    await env.DB.prepare(
+      "INSERT INTO edge (source, page_at) VALUES (?, ?) ON CONFLICT (source) DO UPDATE SET page_at = excluded.page_at " +
+        "WHERE edge.page_at IS NULL OR edge.page_at < ?",
+    ).bind(source, now, now - PAGE_MARK_MS).run();
+  } catch (e) {
+    console.warn(`${source}: page not marked: ${e}`);
   }
-  if (request.method === "GET" && pathname === "/api/v1/schedule") {
-    const held = PAGE_HELD.get(source);
-    let body = held && Date.now() - held.at < PAGE_CACHE_MS ? held.body : null;
-    try {
-      if (!body) {
-        body = await pageBody(env, source, Date.now());
-        if (body) PAGE_HELD.set(source, { at: Date.now(), body });
-      }
-    } catch (e) {
-      console.error(`${source}: page: ${e}`);
+  return new Response(PAGE_HTML, { headers: { "content-type": "text/html; charset=utf-8", ...NO_CACHE } });
+}
+
+// GET /page/<source>: the page's data, for the page served from this source's host only (CORS); held 20 s in an
+// isolate. 503 before the first good read.
+async function pageData(env, source) {
+  const cors = { "access-control-allow-origin": `https://${SOURCES[source].page}`, vary: "origin" };
+  const held = PAGE_HELD.get(source);
+  let body = held && Date.now() - held.at < PAGE_CACHE_MS ? held.body : null;
+  try {
+    if (!body) {
+      body = await pageBody(env, source, Date.now());
+      if (body) PAGE_HELD.set(source, { at: Date.now(), body });
     }
-    if (body) {
-      await origin?.body?.cancel();
-      return new Response(body, { headers: { "content-type": "application/json", ...NO_CACHE } });
-    }
+  } catch (e) {
+    console.error(`${source}: page: ${e}`);
   }
-  return origin || new Response("dtek-service is away", { status: 503, headers: NO_CACHE });
+  if (!body) return new Response("no read yet", { status: 503, headers: { ...cors, ...NO_CACHE } });
+  return new Response(body, { headers: { "content-type": "application/json", ...cors, ...NO_CACHE } });
 }
 
 // --- The home service's side (app/edge.py) ---
@@ -1244,12 +1255,14 @@ export default {
     if (at.getUTCHours() === 3 && at.getUTCMinutes() === 0) await prune(env, now);
   },
 
-  // The mini apps' hosts (standIn), and the home service's side of the turns (app/edge.py), with EDGE_KEY:
-  // POST /home|claim|status|test/<source>.
+  // The mini apps' pages (standIn) and their data (GET /page/<source>), and the home service's side of the turns
+  // (app/edge.py), with EDGE_KEY: POST /home|claim|status|test/<source>.
   async fetch(request, env) {
     const url = new URL(request.url);
     const page = PAGES[url.hostname];
     if (page) return standIn(request, env, page);
+    const data = url.pathname.match(/^\/page\/([a-z]+)$/);
+    if (request.method === "GET" && data && SOURCES[data[1]]?.page) return pageData(env, data[1]);
     const match = url.pathname.match(/^\/(home|claim|status|test)\/([a-z]+)$/);
     if (request.method !== "POST" || !match || !SOURCES[match[2]]) return new Response("not found", { status: 404 });
     if (!authorized(request, env)) return new Response("unauthorized", { status: 401 });

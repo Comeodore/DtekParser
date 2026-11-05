@@ -78,27 +78,33 @@ the home service has gone quiet.
   from the turn, so a home service that comes and goes does not make the reserve repeat it. Added
   on 04.11.2026, after kem's emergency without schedules turned into an outage by the schedule at
   11:09 and the kem chats, with the lab off, had no way to see the day.
-- **The mini app, stood in for (05.11.2026).** `dtek-schedule.comeodore.services` (kem) and
-  `dtek-krem-schedule.comeodore.services` (krem) are Worker routes to this worker. Every request goes
-  on to the home service through the tunnel as before; only when that answers 530 (no tunnel), 502–504
-  or 520–524, or not within 8 s, `/` is the same page (app/static/index.html, uploaded with the
-  worker as a Text module) and `/api/v1/schedule` comes from here, built from D1 alone: dtek-brain's
-  `page` from the object's last good read (`edge.read`: the house, `read_at`, the house's part of the
-  fact), with `reserve: true`, which the page shows as a note with the time of that read. For kem it
-  also has the power really there and the batteries row: the Victron as the cron last read it from VRM
+- **The mini app, stood in for (05.11.2026).** The Worker routes `dtek-schedule.comeodore.services/` (kem)
+  and `dtek-krem-schedule.comeodore.services/` (krem) cover the page alone, `/` with no query (Telegram
+  opens it so, its own data going after `#`); since 05.11.2026 ~04:41 Kyiv, before that `/*`. So the
+  page's requests for data, every 10 s while it is open, go straight to the home service through the
+  tunnel and cost the reserve nothing; only opening the page is a request here, which goes on to the
+  home service as before. When that does not answer (530 no tunnel, 502–504 or 520–524, or nothing
+  within 8 s), `/` is the same page from here (app/static/index.html, uploaded with the worker as a Text
+  module), and the page, finding the home server down the same way (or no answer in 8 s), asks
+  `GET https://dtek-edge.maksymchuk-vladimir.workers.dev/page/<source>` for its data (CORS for that
+  source's host only; `RESERVE_API` in the page). That data is built from D1 alone: dtek-brain's `page`
+  from the object's last good read (`edge.read`: the house, `read_at`, the house's part of the fact),
+  with `reserve: true`, which the page shows as a note with the time of that read. For kem it also has
+  the power really there and the batteries row: the Victron as the cron last read it from VRM
   (`kv.victron`) and the building's Deye inverters (Elevator, Water); krem's page has the inverter
   diagram of Круглик (2511090098), without what needs the home service: today's grid by tariff (it
   shows the total), the sun forecast and until when the battery lasts. The Deye readings are the cron's
   (`kv.deye`), with the token the home service pushes with kem's baseline while that is good, else one
   of its own from the secrets `DEYE_APP_ID`, `DEYE_APP_SECRET`, `DEYE_EMAIL`, `DEYE_PASSWORD_SHA256`
   (the home service's `DEYE_*`), kept in `kv` until a day before it expires. dtek-brain parses the
-  readings with the home service's own `app/inverter/reading.py`. A page served here marks itself
+  readings with the home service's own `app/inverter/reading.py`. A page served from here marks itself
   wanted (`edge.page_at`, at most once a minute), and for 10 minutes the cron reads the Victron and
-  Deye and the object DTEK for it, in case the home service is alive and only the tunnel is down. One
-  dtek-brain call serves a page for 20 s in an isolate. The page asks once a minute instead of every
-  10 s while its answers carry `reserve`, and leaves the owner's TOU table alone, which only the home
-  service has. Both routes fail open (`request_limit_fail_open`, 05.11.2026): past the daily Workers
-  limit they go straight to the tunnel as before, not to error 1027.
+  Deye and the object DTEK for it, in case the home service is alive and only the tunnel is down; asking
+  `/page/<source>` marks nothing, so nothing on workers.dev can wake a read. One dtek-brain call serves
+  the data for 20 s in an isolate. The page asks once a minute instead of every 10 s while its answers
+  carry `reserve`, and leaves the owner's TOU table alone, which only the home service has. Both routes
+  fail open (`request_limit_fail_open`): past the daily Workers limit the page goes straight to the
+  tunnel as before, not to error 1027.
 - **Nothing piles up.** dtek-service now drops DTEK's news it could not deliver within 15
   minutes (`EVENT_TTL`) instead of 6 hours: after an outage its next cycle reports the difference
   as it is then.
@@ -238,7 +244,7 @@ minute.
 
 | Limit (Free) | airdanger | dtek-edge + dtek-brain, home alive | dtek-edge + dtek-brain, home away |
 | --- | --- | --- | --- |
-| Worker requests, 100,000 | ~1,450 (edge cron) | ~4,300 (2 × 1,440 pushes, 1,440 cron runs) plus the mini apps' own requests | 1,440 cron runs, dtek-brain on changes, the stand-in pages |
+| Worker requests, 100,000 | ~1,450 (edge cron) | ~4,300 (2 × 1,440 pushes, 1,440 cron runs) plus one a mini app opened | 1,440 cron runs, dtek-brain on changes, the stand-in pages and their data once a minute |
 | Durable Objects duration, 13,000 GB-s | ~10,800 (Poller active all day) | 0 | ~30 a day (a read every 5 minutes per source, well under a second each) |
 | Durable Objects requests, 100,000 | ~43,200 | 0 | ~700 a day (2 × 288 alarms, the sends, a wake-up) |
 | Cron triggers, 5 per account | 1 | 1 (every minute) | |
