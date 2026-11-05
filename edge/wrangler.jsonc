@@ -2,7 +2,8 @@
 // 02.11.2026);
 // `npx wrangler deploy` from this folder gives the same Worker. Secrets, set once with
 // `npx wrangler secret put <NAME>`: the addresses KEM_STREET KEM_BUILDING KREM_SETTLEMENT KREM_STREET
-// KREM_BUILDING, and EDGE_KEY, the key the home service sends (its EDGE_KEY in .env).
+// KREM_BUILDING, EDGE_KEY, the key the home service sends (its EDGE_KEY in .env), and its Deye Cloud credentials
+// DEYE_APP_ID DEYE_APP_SECRET DEYE_EMAIL DEYE_PASSWORD_SHA256 (as in .env), for the stand-in mini apps.
 // dtek-brain (brain.py) is a Python Worker of its own, uploaded from what bundle.py packs; deploy it first.
 {
   "name": "dtek-edge",

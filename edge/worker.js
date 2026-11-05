@@ -28,12 +28,20 @@
 // MODE=test runs the reserve on every read from a baseline of its own and sends only to TEST_CHAT_ID, marked,
 // without taking the turn from the home service; any other MODE only reads.
 //
+// The messages that the power is gone or back are this side's alone (05.11.2026), whether the home service runs or
+// not: each source's object watches the power at its address (kem: the Victron from svitlo-edge, right after each
+// of its VRM reads, about once a minute; krem: its Deye inverter every 90 s), and dtek-brain judges a change and
+// words it as the home service did (`power`).
+// A home service that pushes `power_messages: false` sends none of them; one of before still sends its own, so
+// while it is alive this side stays quiet.
+//
 // The mini apps' addresses (dtek-schedule / dtek-krem-schedule.comeodore.services, Cloudflare Tunnel to the home
 // service) are routed through here too. Every request goes on to the home service as before; only when it does not
 // answer (the tunnel or the service down) the page and its /api/v1/schedule come from here instead: the same
-// index.html, with data dtek-brain builds from the last read here, and for kem the power really there and the
-// batteries: the Victron as VRM has it (svitlo-edge, over a service binding) and the building's Deye inverters,
-// read with the Deye token the home service pushed.
+// index.html, with data dtek-brain builds from the last read here; for kem the power really there and the
+// batteries: the Victron as VRM has it (svitlo-edge, over a service binding) and the building's Deye inverters; for
+// krem the inverter diagram. The kem object reads every Deye inverter in one call (Deye counts calls, not devices),
+// with the token the home service pushed, else one of its own from the DEYE_* secrets.
 //
 // Budget on Workers Free, shared with airdanger (see README.md):
 // - a Durable Object is billed only while it works (a read, a push, a send), well inside what
@@ -46,20 +54,36 @@ import { DurableObject } from "cloudflare:workers";
 // Served as the mini app while the home service is away (a Text module).
 import PAGE_HTML from "../app/static/index.html";
 
-// scheduled_notices: while the reserve is in charge, DTEK's notices of outages by the schedule go to the chats
-// too (start, new end, end): the home service leaves them to the mini app, which is down with it; kem only
-// (04.11.2026).
 // page: the host of the source's mini app, stood in for while the home service is away; victron: its page shows
-// the home's Victron (svitlo-edge).
+// the home's Victron (svitlo-edge); deye: the building's inverters its page shows (DEYE_BATTERIES at home), by name
+// and serial; inverter: the serial of the inverter its diagram shows (krem, Круглик); power: what says whether
+// the address has power, for the messages that it is gone or back.
 const SOURCES = {
   kem: {
     site: "https://www.dtek-kem.com.ua",
-    scheduled_notices: true,
     page: "dtek-schedule.comeodore.services",
     victron: true,
+    power: "victron",
+    deye: [
+      ["elevator", "2407244424"],
+      ["water", "2407244735"],
+    ],
   },
-  krem: { site: "https://www.dtek-krem.com.ua", page: "dtek-krem-schedule.comeodore.services" },
+  krem: {
+    site: "https://www.dtek-krem.com.ua",
+    page: "dtek-krem-schedule.comeodore.services",
+    inverter: "2511090098",
+    power: "inverter",
+  },
 };
+// The Deye inverters a source's page shows, and all of them, read together by DEYE_HOLDER's object.
+const deyeDevices = (source) => [
+  ...(SOURCES[source].deye || []).map(([, sn]) => sn),
+  ...(SOURCES[source].inverter ? [SOURCES[source].inverter] : []),
+];
+const ALL_DEYE = Object.keys(SOURCES).flatMap(deyeDevices);
+// It holds the token the home service pushes (with DEYE_BATTERIES_SOURCE's baseline).
+const DEYE_HOLDER = "kem";
 const PAGES = Object.fromEntries(
   Object.entries(SOURCES).filter(([, s]) => s.page).map(([name, s]) => [s.page, name]),
 );
@@ -71,7 +95,25 @@ const PAGE_CACHE_MS = 20 * 1000;
 // The Deye loggers upload every ~72 s.
 const DEYE_EVERY_MS = 60 * 1000;
 const DEYE_TIMEOUT_MS = 10 * 1000;
+// As DEYE_BASE_URL and DEYE_MIN_GRID_VOLTAGE at home.
+const DEYE_BASE_URL = "https://eu1-developer.deyecloud.com";
+const DEYE_MIN_GRID_V = 100;
+// Deye's tokens live 60 days; one of its own is renewed a day before that.
+const DEYE_TOKEN_MARGIN_MS = 24 * 3600 * 1000;
 const NO_CACHE = { "cache-control": "no-cache, no-store, must-revalidate" };
+// The page's data per source, held in this isolate for PAGE_CACHE_MS: an open page asks every 10 s, and each ask that
+// reaches the object keeps it awake. The account's free Durable Object time is mostly airdanger's (13,000 GB-s a
+// day, airdanger ~10,800), and ran out on 04.11.2026.
+const PAGE_HELD = new Map();
+// How often the power is looked at: svitlo-edge reads VRM right after each GX log (about a minute apart) and says
+// when it reads next, which kem's look follows (POWER_AFTER_MS later; this is the fallback). Deye's logger uploads
+// every ~72 s, and Deye counts calls (the home service makes ~43k of the 100k a month; every 90 s here adds ~29k).
+const POWER_EVERY_MS = { victron: 60 * 1000, inverter: 90 * 1000 };
+const POWER_AFTER_MS = 3 * 1000;
+// A reading older than this says nothing about the power now.
+const POWER_FRESH_MS = 10 * 60 * 1000;
+// As MESSAGE_TTL at home, where power messages kept 6 h.
+const POWER_TTL_MIN = 6 * 60;
 const WATCHED = ["kem", "krem"];
 // 5 minutes was the longest interval of the round on 01.11.2026, and reading more often drew no
 // fewer challenges.
@@ -323,7 +365,7 @@ export class Watcher extends DurableObject {
 
   // POST /status/<source>: what this side knows, for checks; never the token.
   async status() {
-    const got = await this.ctx.storage.get(["home", "reserve", "shadow", "outbox", "strikes", "next_read", "fact_update", "fact", "shown", "shadow_shown"]);
+    const got = await this.ctx.storage.get(["home", "reserve", "shadow", "outbox", "strikes", "next_read", "fact_update", "fact", "shown", "shadow_shown", "power"]);
     const home = got.get("home");
     const turn = (state) => state && { since: state.since, updated_at: state.updated_at, queued: state.queued };
     return {
@@ -346,6 +388,7 @@ export class Watcher extends DurableObject {
       next_read: got.get("next_read") || null,
       fact_update: got.get("fact_update") || null,
       fact_kept: Boolean(got.get("fact")),
+      power: got.get("power") || null,
     };
   }
 
@@ -369,10 +412,15 @@ export class Watcher extends DurableObject {
     if (this.env.PAUSED === "1") return;
     const source = await this.ctx.storage.get("source");
     let nextRead = (await this.ctx.storage.get("next_read")) || 0;
+    let nextPower = (await this.ctx.storage.get("next_power")) || 0;
+    const every = POWER_EVERY_MS[SOURCES[source]?.power] || null;
     try {
       if (Date.now() >= nextRead) {
         const strikes = await this.read(source);
         nextRead = Date.now() + nextReadMin(strikes) * 60 * 1000;
+      } else if (every && Date.now() >= nextPower) {
+        nextPower = Date.now() + every;
+        nextPower = (await this.watchPower(source)) || nextPower;
       } else {
         // Messages get runs of their own: a read and a few messages in one could pass the 10 ms of CPU.
         await this.send(source);
@@ -381,10 +429,90 @@ export class Watcher extends DurableObject {
       console.error(`${source}: ${e}`);
       if (nextRead <= Date.now()) nextRead = Date.now() + INTERVAL_MIN * 60 * 1000;
     } finally {
-      await this.ctx.storage.put("next_read", nextRead);
+      await this.ctx.storage.put({ next_read: nextRead, next_power: nextPower });
       const send = nextSend(await this.ctx.storage.get("outbox"), Date.now() + 1000);
-      await this.ctx.storage.setAlarm(send === null ? nextRead : Math.min(nextRead, send));
+      // A power look not made yet is due at once; an alarm wants a time ahead.
+      const at = Math.min(nextRead, every ? nextPower : Infinity, send ?? Infinity);
+      await this.ctx.storage.setAlarm(Math.max(at, Date.now() + 1000));
     }
+  }
+
+  // The power at the source's address. On a change (or at first) dtek-brain judges it and words the message as the
+  // home service did; the message goes to the chats as DTEK's news does, kept 6 h. Returns when to look next, when
+  // the source says (svitlo-edge's next read), else null.
+  async watchPower(source) {
+    const now = Date.now();
+    const observed = SOURCES[source].power === "victron" ? await this.victronPower(now) : await this.inverterPower(source, now);
+    const next = observed?.next > now && observed.next < now + 3 * 60 * 1000 ? observed.next + POWER_AFTER_MS : null;
+    if (!observed?.at) return next;
+    const got = await this.ctx.storage.get(["power", "home", "house", "house_ts", "read_at", "fact", "names", "outbox"]);
+    const power = got.get("power");
+    if (power && power.on === observed.on) return next;
+    const home = got.get("home") || {};
+    const house = got.get("house");
+    const fact = got.get("fact");
+    const { building } = address(this.env, source);
+    const read = house && fact && got.get("read_at");
+    const forBrain = read ? forHouse(fact, got.get("names") || {}, house.sub_type_reason || []) : null;
+    const reply = JSON.parse(
+      await this.env.BRAIN.power(
+        JSON.stringify({
+          source,
+          now,
+          lang: home.lang || "uk",
+          building,
+          ...(read
+            ? {
+                answer: { result: true, data: { [building]: house }, updateTimestamp: got.get("house_ts") },
+                fact: forBrain.fact,
+                names: forBrain.names,
+                read_at: got.get("read_at"),
+              }
+            : {}),
+          state: power || null,
+          observed,
+        }),
+      ),
+    );
+    const chats = this.powerChats(home, now);
+    const outbox = got.get("outbox") || [];
+    for (const text of reply.texts) {
+      const marked = this.mode() === "test" ? `🧪 <i>${source}, reserve</i>\n\n${text}` : text;
+      for (const chat of chats) outbox.push({ chat: String(chat), text: marked, expires: now + POWER_TTL_MIN * 60 * 1000, attempts: 0 });
+    }
+    await this.ctx.storage.put({ power: reply.state, outbox });
+    const what = power ? (observed.on ? "back" : "gone") : `first seen ${observed.on ? "on" : "off"}`;
+    console.warn(`${source}: power ${what} at ${new Date(observed.at).toISOString()} (${observed.battery}); ${reply.texts.length * chats.length} messages`);
+    return next;
+  }
+
+  // Who gets the power messages: the source's chats, always once the home service says it sends none, else only
+  // while it is away (a home service of before sends its own); TEST_CHAT_ID with MODE=test; nobody otherwise.
+  powerChats(home, now) {
+    const mode = this.mode();
+    if (mode === "test") return this.env.TEST_CHAT_ID ? [this.env.TEST_CHAT_ID] : [];
+    if (mode !== "live") return [];
+    const away = !home.at || now - home.at >= LEASE_MIN * 60 * 1000;
+    return home.power_messages === false || away ? home.chat_ids || [] : [];
+  }
+
+  // kem: svitlo-edge's grid while its data is fresh, since the GX log that first showed it, and when it reads next
+  // (alone, with no `at`, when the data is not fresh).
+  async victronPower(now) {
+    const v = await this.victron();
+    if (!v) return null;
+    if (v.grid === null || v.grid === undefined || !(now - v.grid_at <= POWER_FRESH_MS)) return { next: v.next_read_at };
+    return { on: Boolean(v.grid), at: v.grid_since || v.grid_at, battery: percent(v.soc), next: v.next_read_at };
+  }
+
+  // krem: its inverter's grid voltage held against DEYE_MIN_GRID_V, as at home, from a fresh reading.
+  async inverterPower(source, now) {
+    const item = (await this.deyeFor(source))?.find((it) => it.deviceSn === SOURCES[source].inverter);
+    const at = Number(item?.collectionTime) * 1000;
+    if (!item || !(now - at <= POWER_FRESH_MS)) return null;
+    const values = Object.fromEntries((item.dataList || []).map((point) => [point.key, point.value]));
+    const gridV = [values.GridVoltageL1L2, values.GridVoltageL1].map(parseFloat).find(Number.isFinite);
+    return { on: gridV !== undefined && gridV >= DEYE_MIN_GRID_V, at, battery: percent(parseFloat(values.SOC)) };
   }
 
   // One read, logged to D1. Returns the challenges in a row so far.
@@ -548,7 +676,6 @@ export class Watcher extends DurableObject {
               fingerprint: home.fingerprint,
               lang: home.lang,
               notify_outages: home.notify_outages,
-              scheduled_notices: Boolean(SOURCES[source].scheduled_notices),
               shown: shown || [],
             }),
           ),
@@ -574,8 +701,8 @@ export class Watcher extends DurableObject {
   }
 
   // The mini app's /api/v1/schedule while the home service is away: dtek-brain's page from the last good read,
-  // with the Victron (svitlo-edge) where the source has one and the building's Deye inverters where the home
-  // service pushed a token for them. A JSON string, or null before the first good read.
+  // with the Victron (svitlo-edge) and the Deye inverters where the source has them. A JSON string, or null before
+  // the first good read.
   async page(source) {
     const now = Date.now();
     if (this.pageCache && now - this.pageCache.at < PAGE_CACHE_MS) return this.pageCache.body;
@@ -586,10 +713,16 @@ export class Watcher extends DurableObject {
     if (!house || !fact || !got.get("read_at")) return null;
     const { building } = address(this.env, source);
     const forBrain = forHouse(fact, got.get("names") || {}, house.sub_type_reason || []);
-    const [victron, deye] = await Promise.all([
+    const [victron, items] = await Promise.all([
       SOURCES[source].victron ? this.victron() : null,
-      this.deyeBatteries(home.deye, now),
+      deyeDevices(source).length ? this.deyeFor(source) : null,
     ]);
+    const deye = items && {
+      items,
+      batteries: SOURCES[source].deye || [],
+      main: SOURCES[source].inverter || null,
+      min_grid_voltage: DEYE_MIN_GRID_V,
+    };
     const body = await this.env.BRAIN.page(
       JSON.stringify({
         source,
@@ -619,6 +752,7 @@ export class Watcher extends DurableObject {
         soc: p.soc,
         battery_w: p.batteryW,
         battery_at: p.batteryAt,
+        next_read_at: p.nextReadAt,
       };
     } catch (e) {
       console.warn(`victron: ${e}`);
@@ -626,30 +760,67 @@ export class Watcher extends DurableObject {
     }
   }
 
-  // The building's inverters from Deye Cloud (device/latest, one call for all), with the token the home service
-  // pushed; at most once a minute. Null without a token that is still good, or when the call fails.
-  async deyeBatteries(deye, now) {
-    if (!deye?.token || !(deye.expires_at > now) || !deye.batteries?.length) return null;
-    if (this.deyeCache && now - this.deyeCache.at < DEYE_EVERY_MS) return this.deyeCache.rows;
-    let rows = null;
+  // This source's Deye inverters, from DEYE_HOLDER's last read of them all; null when there is none.
+  async deyeFor(source) {
     try {
-      const data = await within(DEYE_TIMEOUT_MS, async (signal) => {
-        const response = await fetch(`${deye.base_url}/v1.0/device/latest`, {
-          method: "POST",
-          headers: { "content-type": "application/json", authorization: `Bearer ${deye.token}` },
-          body: JSON.stringify({ deviceList: deye.batteries.map(([, sn]) => sn) }),
-          signal,
-        });
-        return response.json();
-      });
-      if (!data.success) throw new Error(`device/latest: ${data.code} ${data.msg}`);
-      const bySn = new Map((data.deviceDataList || []).map((item) => [item.deviceSn, item]));
-      rows = deye.batteries.map(([name, sn]) => deyeRow(name, bySn.get(sn), deye.min_grid_voltage)).filter(Boolean);
+      const items = source === DEYE_HOLDER ? await this.deyeItems() : await watcher(this.env, DEYE_HOLDER).deyeItems();
+      const mine = new Set(deyeDevices(source));
+      return items && items.filter((item) => mine.has(item.deviceSn));
+    } catch (e) {
+      console.warn(`${source}: deye: ${e}`);
+      return null;
+    }
+  }
+
+  // DEYE_HOLDER's object: every inverter of ALL_DEYE from Deye Cloud (device/latest's deviceDataList), in one call
+  // at most once a minute, with the token the home service pushed while it is good, else with one of its own
+  // (deyeToken). Null without a token, or when the call fails.
+  async deyeItems() {
+    const now = Date.now();
+    if (this.deyeCache && now - this.deyeCache.at < DEYE_EVERY_MS) return this.deyeCache.items;
+    const pushed = (await this.ctx.storage.get("home"))?.deye;
+    const base = pushed?.base_url || DEYE_BASE_URL;
+    let items = null;
+    try {
+      const own = !(pushed?.token && pushed.expires_at > now);
+      let token = own ? await this.deyeToken(base, now) : pushed.token;
+      let data = token ? await deyeLatest(base, token, ALL_DEYE) : null;
+      if (data && !data.success && own) {
+        // A token of its own that Deye no longer takes (the home service got a new one, say): one more try.
+        await this.ctx.storage.delete("deye_token");
+        token = await this.deyeToken(base, now);
+        data = await deyeLatest(base, token, ALL_DEYE);
+      }
+      if (data && !data.success) throw new Error(`device/latest: ${data.code} ${data.msg}`);
+      if (data) items = data.deviceDataList || [];
     } catch (e) {
       console.warn(`deye: ${e}`);
     }
-    this.deyeCache = { at: now, rows };
-    return rows;
+    this.deyeCache = { at: now, items };
+    return items;
+  }
+
+  // A Deye token of its own, from the home service's credentials in the DEYE_APP_ID, DEYE_APP_SECRET, DEYE_EMAIL and
+  // DEYE_PASSWORD_SHA256 secrets; kept until a day before it expires. Null without them.
+  async deyeToken(base, now) {
+    const { DEYE_APP_ID, DEYE_APP_SECRET, DEYE_EMAIL, DEYE_PASSWORD_SHA256 } = this.env;
+    if (!DEYE_APP_ID || !DEYE_APP_SECRET || !DEYE_EMAIL || !DEYE_PASSWORD_SHA256) return null;
+    const saved = await this.ctx.storage.get("deye_token");
+    if (saved && saved.until > now) return saved.token;
+    const data = await within(DEYE_TIMEOUT_MS, async (signal) => {
+      const response = await fetch(`${base}/v1.0/account/token?appId=${encodeURIComponent(DEYE_APP_ID)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ appSecret: DEYE_APP_SECRET, email: DEYE_EMAIL, password: DEYE_PASSWORD_SHA256 }),
+        signal,
+      });
+      return response.json();
+    });
+    if (!data.success || !data.accessToken) throw new Error(`account/token: ${data.code} ${data.msg}`);
+    const until = now + Math.max(0, Number(data.expiresIn || 0) * 1000 - DEYE_TOKEN_MARGIN_MS);
+    await this.ctx.storage.put("deye_token", { token: data.accessToken, until });
+    console.log(`deye: a token of its own until ${new Date(until).toISOString()}`);
+    return data.accessToken;
   }
 
   // Up to SEND_PER_RUN queued messages, in order per chat; a chat that has to wait holds back its later ones.
@@ -687,27 +858,22 @@ export class Watcher extends DurableObject {
   }
 }
 
-// One inverter of device/latest as dtek-brain's power_now takes it; as parse_device_latest at home: Deye reports
-// battery power negative while charging, and the grid is there when its voltage reaches min_grid_voltage.
-export function deyeRow(name, item, minGridVoltage) {
-  if (!item?.collectionTime) return null;
-  const values = Object.fromEntries((item.dataList || []).map((point) => [point.key, point.value]));
-  const num = (...keys) => {
-    for (const key of keys) {
-      const value = parseFloat(values[key]);
-      if (Number.isFinite(value)) return value;
-    }
-    return null;
-  };
-  const battery = num("BatteryPower");
-  const gridV = num("GridVoltageL1L2", "GridVoltageL1");
-  return {
-    name,
-    soc: num("SOC"),
-    battery_w: battery === null ? null : -battery,
-    grid: gridV !== null && gridV >= minGridVoltage,
-    at: Number(item.collectionTime) * 1000,
-  };
+// A battery's charge as the power messages show it, as parse_battery at home.
+function percent(soc) {
+  return Number.isFinite(soc) ? `${Math.round(soc)}%` : "N/A";
+}
+
+// device/latest for these inverters' serials; Deye's answer, or one with success false when it gave no JSON.
+async function deyeLatest(base, token, serials) {
+  return within(DEYE_TIMEOUT_MS, async (signal) => {
+    const response = await fetch(`${base}/v1.0/device/latest`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ deviceList: serials }),
+      signal,
+    });
+    return response.json().catch(() => ({ success: false, code: `HTTP ${response.status}`, msg: "not JSON" }));
+  });
 }
 
 // A request to a mini app's host: to the home service as always; while that does not answer, the page and its
@@ -724,9 +890,13 @@ async function standIn(request, env, source) {
     return new Response(PAGE_HTML, { headers: { "content-type": "text/html; charset=utf-8", ...NO_CACHE } });
   }
   if (request.method === "GET" && pathname === "/api/v1/schedule") {
-    let body = null;
+    const held = PAGE_HELD.get(source);
+    let body = held && Date.now() - held.at < PAGE_CACHE_MS ? held.body : null;
     try {
-      body = await watcher(env, source).page(source);
+      if (!body) {
+        body = await watcher(env, source).page(source);
+        if (body) PAGE_HELD.set(source, { at: Date.now(), body });
+      }
     } catch (e) {
       console.error(`${source}: page: ${e}`);
     }

@@ -10,11 +10,14 @@ from app.config import ConfigError, load_settings
 from app.dtek.models import Snapshot
 from app.edge import Edge
 from app.engine.events import ScheduleChange, ScheduleEvent
+from app.inverter.reading import parse_device_latest
+from app.notify.messages import render_power
 from app.notify.router import Router
 from app.power.state import PowerStatus, PowerTransition
 from app.storage.memory import MemoryStore
 from tests.conftest import BASE_ENV, kyiv, one
 from tests.test_collector import DAY_OCT1, DAY_OCT2, FakeSite, fact, hours, texts
+from tests.test_inverter import device
 
 PUBLISHED = "📅 <b>Tomorrow's schedule published</b> (02.10)\n\n🔴 08:00 – 10:00"
 
@@ -81,6 +84,8 @@ async def test_every_good_cycle_pushes_the_baseline_bot_and_chats(pipeline):
     assert push["baseline"] == store.data.sources["kem"].baseline
     assert (push["token"], push["chat_ids"], push["lang"], push["notify_outages"]) == ("1:a", ["111", "222"], "en", True)
     assert push["fingerprint"] == collector.config.fingerprint
+    # The power messages are the reserve's.
+    assert push["power_messages"] is False
 
 
 async def test_failed_cycle_does_not_push(pipeline):
@@ -217,41 +222,6 @@ def test_edge_url_and_key_go_together():
     assert (settings.edge_url, settings.edge_key) == ("https://edge.test", "k")
 
 
-STABILISATION = "Стабілізаційне відключення (Згідно графіку погодинних відключень)"
-
-
-@pytest.mark.parametrize("scheduled", [True, False])
-async def test_reserve_sends_outages_by_the_schedule_only_where_marked(pipeline, scheduled):
-    """kem: while the reserve is in charge the mini app is down, so DTEK's notice of an outage by the schedule goes
-    to the chats as text, from its start to its end. Elsewhere, and from the home service, it does not."""
-    collector, site, _, _, edge = pipeline
-    site.fact = fact("01.10.2026 06:50", {DAY_OCT1: {"GPV4.1": hours(19, 20)}})
-    await collector.cycle()
-    read = reserve_reads(site, edge.calls[-1][2], **({"scheduled_notices": True} if scheduled else {}))
-    read(kyiv(2026, 10, 1, 18, 10))
-    house = site.answer["data"]["43"]
-    house.update(type="2", start_date="19:02 01.10.2026", end_date="21:00 01.10.2026", sub_type=STABILISATION)
-    started = read(kyiv(2026, 10, 1, 19, 5))
-    house.update(end_date="22:00 01.10.2026")
-    moved = read(kyiv(2026, 10, 1, 19, 10))
-    for key in ("type", "start_date", "end_date", "sub_type"):
-        house.pop(key, None)
-    read(kyiv(2026, 10, 1, 21, 55))
-    ended = read(kyiv(2026, 10, 1, 22, 0))
-    assert [r["events"] for r in (started, moved, ended)] == [
-        ["outage started"], ["outage restoration_changed"], ["outage ended"]]
-    if not scheduled:
-        assert started["texts"] == moved["texts"] == ended["texts"] == []
-        return
-    assert started["texts"][0].startswith("⚡ <b>Outage at the address</b>\n\n")
-    assert "19:02" in started["texts"][0] and "21:00" in started["texts"][0]
-    assert moved["texts"][0].startswith("🕐 <b>Restoration time changed</b>\n\n21:00 → <b>until 22:00</b>")
-    assert ended["texts"] == ["✅ <b>DTEK no longer reports an outage at the address</b>"]
-    # Each once, and nothing else on top: the day did not change.
-    assert [len(r["texts"]) for r in (started, moved, ended)] == [1, 1, 1]
-
-
-
 def reserve_page(site, now, read_at=None, **extra):
     """The mini app's data as worker.js asks dtek-brain for it while the home service is away."""
     return brain.page({
@@ -293,14 +263,25 @@ def test_reserve_page_without_fresh_data_says_so():
     assert page["batteries"] == [{"name": "home", "soc": 40, "battery_w": 0, "stale": True}]
 
 
+def deye_item(sn, at, **points):
+    """One inverter of device/latest, as dtek-edge passes it on: the fixture's points with these changed."""
+    item = device(**points)
+    item.update(deviceSn=sn, collectionTime=str(int(at.timestamp())))
+    return item
+
+
 def test_reserve_page_falls_back_on_the_building_inverters():
     site = FakeSite()
     now = kyiv(2026, 10, 1, 19, 30)
-    deye = [{"name": "elevator", "soc": 88, "battery_w": -150, "grid": False, "at": ms(now) - 60_000},
-            {"name": "water", "soc": 64, "battery_w": 900, "grid": False, "at": ms(now) - 90_000}]
+    lift = deye_item("L", now - timedelta(minutes=1), SOC="88", BatteryPower="150", GridVoltageL1L2="0")
+    water = deye_item("W", now - timedelta(minutes=2), SOC="64", BatteryPower="-900", GridVoltageL1L2="0")
+    deye = {"items": [water, lift], "batteries": [["elevator", "L"], ["water", "W"]], "min_grid_voltage": 100}
     page = reserve_page(site, now, deye=deye)
     assert (page["power"]["state"], page["power"]["since"], page["power"]["source"]) == ("off", None, "deye_batteries")
-    assert [(b["name"], b["soc"], b["stale"]) for b in page["batteries"]] == [("elevator", 88, False), ("water", 64, False)]
+    # In DEYE_BATTERIES' order, with Deye's sign turned: positive while charging.
+    assert [(b["name"], b["soc"], b["battery_w"], b["stale"]) for b in page["batteries"]] == [
+        ("elevator", 88, -150, False), ("water", 64, 900, False)]
+    assert page["inverter"] is None
     # With the Victron there, it comes first and its battery leads the row.
     victron = {"grid": True, "grid_since": ms(now) - 3_600_000, "grid_at": ms(now), "soc": 90, "battery_w": 50,
                "battery_at": ms(now)}
@@ -308,8 +289,24 @@ def test_reserve_page_falls_back_on_the_building_inverters():
     assert (page["power"]["state"], page["power"]["source"]) == ("on", "vrm")
     assert [b["name"] for b in page["batteries"]] == ["home", "elevator", "water"]
     # Inverters that disagree say nothing about the grid.
-    deye[1]["grid"] = True
+    deye["items"][0] = deye_item("W", now, SOC="64", GridVoltageL1L2="231")
     assert reserve_page(site, now, deye=deye)["power"] is None
+
+
+def test_reserve_page_draws_the_krem_inverter():
+    site = FakeSite()
+    now = kyiv(2026, 10, 16, 17, 25)
+    deye = {"items": [deye_item("K", kyiv(2026, 10, 16, 17, 22))], "main": "K", "min_grid_voltage": 100}
+    page = reserve_page(site, now, deye=deye)
+    inverter = page["inverter"]
+    # As the home service's diagram, from the same reading.
+    assert inverter == dict(parse_device_latest(deye["items"][0], 100).to_dict(now, 15 * 60),
+                            grid_night_kwh=None, grid_day_kwh=None, pv_forecast_kwh=None, battery_until=None)
+    assert inverter["time"] == "17:22" and inverter["stale"] is False and inverter["grid_present"] is True
+    assert page["batteries"] == [] and page["power"] is None
+    # An old reading is drawn greyed out; an inverter Deye has no data for is not drawn.
+    assert reserve_page(site, now + timedelta(minutes=20), deye=deye)["inverter"]["stale"] is True
+    assert reserve_page(site, now, deye=dict(deye, main="X"))["inverter"] is None
 
 
 async def test_the_batteries_source_pushes_what_the_reserve_reads_deye_with(pipeline):
@@ -322,3 +319,41 @@ async def test_the_batteries_source_pushes_what_the_reserve_reads_deye_with(pipe
     edge.deye = lambda source: None
     await collector.cycle()
     assert "deye" not in edge.calls[-1][2]
+
+
+def power_call(site, now, state, on, at, battery="71%", lang="en"):
+    """What worker.js asks dtek-brain when the power it watches changes (or at first)."""
+    return brain.power({
+        "source": "kem", "now": ms(now), "lang": lang, "building": "43",
+        "answer": copy.deepcopy(site.answer), "fact": copy.deepcopy(site.fact), "names": {"GPV4.1": "Черга 4.1"},
+        "read_at": ms(now), "state": state, "observed": {"on": on, "at": ms(at), "battery": battery},
+    })
+
+
+def test_reserve_power_messages_are_the_home_services():
+    site = FakeSite()
+    site.fact = fact("01.10.2026 06:50", {DAY_OCT1: {"GPV4.1": hours(19, 20)}})
+    # The first observation only sets the state.
+    first = power_call(site, kyiv(2026, 10, 1, 18, 0), None, True, kyiv(2026, 10, 1, 7, 30))
+    assert first == {"state": {"on": True, "since": ms(kyiv(2026, 10, 1, 7, 30))}, "texts": []}
+    assert power_call(site, kyiv(2026, 10, 1, 18, 30), first["state"], True, kyiv(2026, 10, 1, 18, 29))["texts"] == []
+    # Gone at 19:01, seen a minute later: worded as at home, with the schedule's end, and not as a late notice.
+    off = power_call(site, kyiv(2026, 10, 1, 19, 2), first["state"], False, kyiv(2026, 10, 1, 19, 1))
+    transition = PowerTransition(PowerStatus.OFF, kyiv(2026, 10, 1, 19, 1), kyiv(2026, 10, 1, 7, 30), "71%", False)
+    snapshot = brain._snapshot({"source": "kem", "building": "43", "answer": site.answer, "fact": site.fact,
+                                "names": {"GPV4.1": "Черга 4.1"}}, kyiv(2026, 10, 1, 19, 2))
+    assert off["texts"] == [render_power(transition, snapshot, kyiv(2026, 10, 1, 19, 2), "en")]
+    assert "21:00" in off["texts"][0]
+    assert off["state"] == {"on": False, "since": ms(kyiv(2026, 10, 1, 19, 1))}
+    back = power_call(site, kyiv(2026, 10, 1, 20, 47), off["state"], True, kyiv(2026, 10, 1, 20, 46), "38%")
+    assert back["texts"][0].startswith("🟢") and "38%" in back["texts"][0] and "1h 45m" in back["texts"][0]
+
+
+def test_home_sends_no_power_messages_while_the_reserve_is_configured():
+    transition = PowerTransition(PowerStatus.OFF, kyiv(2026, 10, 1, 19, 1), kyiv(2026, 10, 1, 7, 30), "71%", False)
+    plain = Router(load_settings(BASE_ENV))
+    assert len(plain.for_power(transition, None, kyiv(2026, 10, 1, 19, 2))) == 2
+    with_reserve = Router(load_settings({**BASE_ENV, "EDGE_URL": "https://edge.test", "EDGE_KEY": "k"}))
+    assert with_reserve.for_power(transition, None, kyiv(2026, 10, 1, 19, 2)) == []
+    assert with_reserve.for_grid("krem", transition, None, kyiv(2026, 10, 1, 19, 2)) == []
+

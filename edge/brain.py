@@ -1,8 +1,8 @@
 """dtek-brain: dtek-service's own detection and texts (app/brain.py), for the reserve in worker.js.
 
 A Python Worker that bundle.py packs with the app modules app/brain.py imports; worker.js calls `process` (each
-read) and `page` (the mini app, while the home service's is down) over a service binding. Python Workers come
-without tzdata, so Europe/Kyiv is bundled as its tz file.
+read), `power` (the power gone or back) and `page` (the mini app, while the home service's is down) over a service
+binding. Python Workers come without tzdata, so Europe/Kyiv is bundled as its tz file.
 """
 import base64
 import json
@@ -42,9 +42,18 @@ def warm_up() -> None:
         json.dumps(brain.process(dict(request, lang=lang, baseline=dict(first["baseline"], days=[], outage=None))))
         victron = {"grid": False, "grid_since": request["now"] - 3600_000, "grid_at": request["now"],
                    "soc": 80, "battery_w": -300, "battery_at": request["now"]}
-        deye = [{"name": "elevator", "soc": 50, "battery_w": 0, "grid": False, "at": request["now"]}]
+        item = {"deviceSn": "1", "collectionTime": request["now"] // 1000, "dataList": [
+            {"key": key, "value": value} for key, value in (
+                ("SOC", "50"), ("BatteryPower", "-300"), ("GridVoltageL1L2", "0"), ("TotalConsumptionPower", "400"),
+                ("TotalDCInputPower", "0"), ("TotalGridPower", "0"), ("DCPowerPV1", "0"), ("DCVoltagePV1", "0"))]}
+        deye = {"items": [item], "batteries": [["elevator", "1"]], "main": "1", "min_grid_voltage": 100}
         json.dumps(brain.page(dict(request, lang=lang, read_at=request["now"], victron=victron, deye=deye)))
         json.dumps(brain.page(dict(request, lang=lang, read_at=request["now"], deye=deye)))
+        state = {"on": True, "since": request["now"] - 7200_000}
+        for on in (False, True):
+            observed = {"on": on, "at": request["now"], "battery": "80%"}
+            reply = brain.power(dict(request, lang=lang, read_at=request["now"], state=state, observed=observed))
+            json.dumps(reply)
 
 
 warm_up()
@@ -56,6 +65,9 @@ class Default(WorkerEntrypoint):
 
     async def process(self, request):
         return json.dumps(brain.process(json.loads(request)), ensure_ascii=False)
+
+    async def power(self, request):
+        return json.dumps(brain.power(json.loads(request)), ensure_ascii=False)
 
     async def page(self, request):
         return json.dumps(brain.page(json.loads(request)), ensure_ascii=False)

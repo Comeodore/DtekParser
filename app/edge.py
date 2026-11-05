@@ -4,8 +4,12 @@ The two take turns and never message a source's chats at the same time. After ea
 its baseline, bot and chats to the reserve; the pushes are also how the reserve knows the service is alive, and
 it takes a source over only once they have stopped for its lease (5 minutes). A source that has not pushed for
 AWAY_AFTER first claims the source back: the reserve hands over the baseline it went on with, so the difference
-reported next starts from what the reserve already sent and nothing is sent twice. Only DTEK's news goes through
-the reserve; power messages stay with this service.
+reported next starts from what the reserve already sent and nothing is sent twice.
+
+The messages that the power is gone or back are no part of the turns: they come from the reserve alone, whether
+this service runs or not (Router.for_grid gives none while the reserve is configured). Each push says so
+(`power_messages: false`); a service that pushes without it still sends its own, and the reserve stays quiet
+while that one is alive.
 
 A failed call leaves the service working as without the reserve: it would rather repeat a message than lose one.
 """
@@ -60,6 +64,8 @@ class Edge:
             "notify_outages": config.notify_outages,
             "chat_ids": list(config.chat_ids),
             "token": self._bots.get(config.bot, ""),
+            # This service sends no power messages while the reserve is configured: the reserve does.
+            "power_messages": False,
         }
         deye = self.deye(config.name)
         if deye is not None:

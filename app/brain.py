@@ -10,11 +10,13 @@ tomorrow's schedule as text each time they are first seen or come to differ from
 shown, even when there is no change to report: on taking a source over, when schedules apply again after an
 emergency without them, when tomorrow is published with no outages.
 
-For a source the worker marks so (kem), DTEK's notices of outages by the schedule are sent too: the start, a new
-end and the end. This service leaves them to the mini app, which is down with it.
+The messages that the power is gone or back come from here alone (`power`), whether this service runs or not:
+kem's from its Victron as VRM has it (svitlo-edge), krem's from its Deye inverter, judged and worded as this
+service did with Home Assistant and the inverter, which no longer send them while the reserve is configured.
 
 The mini app itself is stood in for as well: `page` gives its data from the reserve's last read, with kem's
-Victron as VRM has it (svitlo-edge) for the power really there and the home battery.
+Victron as VRM has it (svitlo-edge) for the power really there and the home battery, the building's Deye
+inverters in kem's batteries row and krem's inverter diagram, from Deye Cloud.
 """
 from __future__ import annotations
 
@@ -26,9 +28,11 @@ from app.dtek.models import DaySchedule, Snapshot
 from app.dtek.protocol import build_snapshot, parse_fact, parse_house
 from app.engine.detector import Baseline, detect
 from app.engine.events import Event, ScheduleEvent
-from app.notify.messages import render_days
+from app.inverter.reading import STALE_S, DeyeError, InverterReading, parse_device_latest
+from app.notify.messages import render_days, render_power
 from app.notify.router import event_texts
 from app.page import page_payload
+from app.power.state import PowerState, PowerStatus, next_state
 from app.power.verdict import Actual
 from app.timeutil import KYIV_TZ
 
@@ -39,8 +43,8 @@ PAGE_STALE = timedelta(minutes=15)
 # shown greyed out.
 VICTRON_FRESH = timedelta(minutes=10)
 BATTERY_FRESH = timedelta(minutes=5)
-# As InverterMonitor.STALE_S at home.
-DEYE_FRESH = timedelta(minutes=15)
+# As DEYE_MIN_GRID_VOLTAGE at home.
+MIN_GRID_V = 100.0
 
 
 def describe(event: Event) -> str:
@@ -91,13 +95,24 @@ def _snapshot(request: dict, fetched_at: datetime) -> Snapshot:
     )
 
 
-def power_now(victron: Optional[dict], deye: Optional[list], now: datetime) -> tuple[Optional[Actual], list[dict]]:
+def deye_readings(deye: Optional[dict]) -> dict[str, InverterReading]:
+    """The inverters in device/latest's deviceDataList by serial, parsed as at home; one without data is left out."""
+    readings = {}
+    for item in (deye or {}).get("items") or []:
+        try:
+            readings[item.get("deviceSn")] = parse_device_latest(item, deye.get("min_grid_voltage", MIN_GRID_V))
+        except DeyeError:
+            continue
+    return readings
+
+
+def power_now(victron: Optional[dict], deye: Optional[dict], now: datetime) -> tuple[Optional[Actual], list[dict]]:
     """The power really there and the batteries row, from what the worker read for the page.
 
     victron: svitlo-edge's last VRM read of the home's Victron: grid (true, false or null), grid_since, grid_at,
     soc, battery_w (positive while charging), battery_at; times in ms.
-    deye: the building's inverters from Deye Cloud, each name, soc, battery_w, grid (its grid voltage held
-    against DEYE_MIN_GRID_VOLTAGE) and at, in DEYE_BATTERIES' order.
+    deye: the inverters from Deye Cloud: `items` (device/latest's deviceDataList), `batteries` ([name, serial] in
+    DEYE_BATTERIES' order) and `min_grid_voltage`.
     As at home: the Victron's grid first, else the inverters' when every fresh one agrees (no since then)."""
     actual, rows = None, []
     if victron:
@@ -108,46 +123,85 @@ def power_now(victron: Optional[dict], deye: Optional[list], now: datetime) -> t
         if victron.get("soc") is not None and battery_at is not None:
             rows.append({"name": "home", "soc": victron["soc"], "battery_w": victron.get("battery_w"),
                          "stale": now - battery_at > BATTERY_FRESH})
+    readings = deye_readings(deye)
     grids = set()
-    for inverter in deye or []:
-        at = _at(inverter.get("at"))
-        if at is None:
+    for name, sn in (deye or {}).get("batteries") or []:
+        reading = readings.get(sn)
+        if reading is None:
             continue
-        stale = now - at > DEYE_FRESH
-        rows.append({"name": inverter["name"], "soc": inverter.get("soc"), "battery_w": inverter.get("battery_w"),
-                     "stale": stale})
-        if not stale and inverter.get("grid") is not None:
-            grids.add(bool(inverter["grid"]))
+        stale = (now - reading.at).total_seconds() > STALE_S
+        rows.append({"name": name, "soc": reading.soc, "battery_w": reading.battery_w, "stale": stale})
+        if not stale:
+            grids.add(reading.grid_present)
     if actual is None and len(grids) == 1:
         actual = Actual(grids.pop(), None, "deye_batteries")
     return actual, rows
 
 
+def inverter_now(deye: Optional[dict], now: datetime) -> Optional[dict]:
+    """The inverter diagram's data (krem), as InverterMonitor.payload at home, from `deye`'s `main` serial. What
+    needs the home service is left out: today's grid by tariff (the page shows the total), the sun forecast
+    (deye-reserve) and until when the battery lasts."""
+    reading = deye_readings(deye).get((deye or {}).get("main"))
+    if reading is None:
+        return None
+    body = reading.to_dict(now, STALE_S)
+    body.update(grid_night_kwh=None, grid_day_kwh=None, pv_forecast_kwh=None, battery_until=None)
+    return body
+
+
 def page(request: dict) -> dict:
     """The mini app's data while the home service's own is down. request: source, now (ms), building, answer,
-    fact, names and read_at (ms) of the reserve's last good read, lang, and for kem `victron` and `deye` (see
-    power_now)."""
+    fact, names and read_at (ms) of the reserve's last good read, lang, `victron` (kem) and `deye`, whose `main`
+    is the inverter of the diagram (krem) and `batteries` the batteries row's (kem); see power_now."""
     now = _at(request["now"])
     read_at = _at(request["read_at"])
     actual, batteries = power_now(request.get("victron"), request.get("deye"), now)
     payload = page_payload(_snapshot(request, read_at), now, request["source"], request["lang"],
-                           now - read_at < PAGE_STALE, read_at, batteries=batteries, actual=actual)
+                           now - read_at < PAGE_STALE, read_at, inverter_now(request.get("deye"), now), batteries,
+                           actual)
     payload["reserve"] = True
     return payload
+
+
+def _ms(at: datetime) -> int:
+    return int(at.timestamp() * 1000)
+
+
+def power(request: dict) -> dict:
+    """The power at a source's address, observed by the worker: request: source, now (ms), lang, `state` (the
+    reply's `state` of the call before; null at first), `observed` (on, at: when the reading that shows it was
+    taken, ms; battery: "71%" or "N/A") and the last read of DTEK (building, answer, fact, names, read_at) for the
+    schedule's context. Returns the next `state` and the message, if the power changed.
+
+    As at home: a first observation only sets the state; a reading is judged at its own time, so a minute-old one
+    is no late notice."""
+    now = _at(request["now"])
+    stored = request.get("state")
+    previous = PowerState(PowerStatus.ON if stored["on"] else PowerStatus.OFF, _at(stored["since"])) if stored else None
+    observed = request["observed"]
+    at = _at(observed["at"])
+    state, transition = next_state(previous, PowerStatus.ON if observed["on"] else PowerStatus.OFF, at, at,
+                                   observed.get("battery") or "N/A", from_snapshot=False)
+    texts = []
+    if transition is not None:
+        snapshot = _snapshot(request, _at(request["read_at"])) if request.get("answer") else None
+        texts.append(render_power(transition, snapshot, now, request["lang"]))
+    return {"state": {"on": state.status is PowerStatus.ON, "since": _ms(state.since)}, "texts": texts}
 
 
 def process(request: dict) -> dict:
     """request: source, now (ms), building, answer (getHomeNum), fact, names, and from the home service's last
     push: baseline, fingerprint, lang, notify_outages. With `shown`, the days the chats were last shown (as the
     reply's `shown` of the call before; [] for none), the schedules are sent as well, and the reply has the
-    next `shown`. With `scheduled_notices`, the notices of outages by the schedule as well."""
+    next `shown`."""
     now = _at(request["now"])
     snapshot = _snapshot(request, now)
     detection = detect(Baseline.from_dict(request.get("baseline")), snapshot, now, request["fingerprint"])
     source = SimpleNamespace(name=request["source"], lang=request["lang"], notify_outages=request["notify_outages"])
     reply = {
         "baseline": detection.baseline.to_dict(),
-        "texts": event_texts(source, detection.events, snapshot, now, bool(request.get("scheduled_notices"))),
+        "texts": event_texts(source, detection.events, snapshot, now),
         "events": [describe(e) for e in detection.events],
         "initialized": detection.initialized,
     }

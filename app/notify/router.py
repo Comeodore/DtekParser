@@ -31,29 +31,26 @@ class OutgoingMessage:
     expires_at: datetime
 
 
-def _notifiable(outage: Optional[Outage], scheduled: bool = False) -> bool:
-    return outage is not None and (scheduled or outage.kind in NOTIFIABLE_KINDS or outage.schedules_suspended)
+def _notifiable(outage: Optional[Outage]) -> bool:
+    return outage is not None and (outage.kind in NOTIFIABLE_KINDS or outage.schedules_suspended)
 
 
-def should_send(event: Event, source: SourceConfig, scheduled: bool = False) -> bool:
-    """`scheduled`: the notices of outages by the schedule as well, which this service leaves to the mini app;
-    the reserve sends them for kem while it is in charge and the mini app is down (edge/worker.js)."""
+def should_send(event: Event, source: SourceConfig) -> bool:
     if isinstance(event, ScheduleEvent):
         return True
     if not source.notify_outages:
         return False
     if event.change is OutageChange.STARTED:
-        return _notifiable(event.outage, scheduled)
-    return _notifiable(event.outage, scheduled) or _notifiable(event.previous, scheduled)
+        return _notifiable(event.outage)
+    return _notifiable(event.outage) or _notifiable(event.previous)
 
 
-def event_texts(source: SourceConfig, events: Iterable[Event], snapshot: Snapshot, now: datetime,
-                scheduled: bool = False) -> list[str]:
+def event_texts(source: SourceConfig, events: Iterable[Event], snapshot: Snapshot, now: datetime) -> list[str]:
     """What a source's chats get for these events. Also run by the reserve's dtek-brain, which passes only
     the name, lang and notify_outages of the source."""
     texts: list[str] = []
     for event in events:
-        if not should_send(event, source, scheduled):
+        if not should_send(event, source):
             logger.info(f"[{source.name}] not notifying {event}")
             continue
         if isinstance(event, ScheduleEvent):
@@ -86,6 +83,10 @@ class Router:
 
     def for_grid(self, source_name: str, transition: PowerTransition, snapshot: Optional[Snapshot],
                  now: datetime) -> list[OutgoingMessage]:
-        """Power lost or back at a source's address, however it was noticed (HA voltage, Deye grid)."""
+        """Power lost or back at a source's address, however it was noticed (HA voltage, Deye grid). None while the
+        reserve on Cloudflare (edge/) is configured: it sends these itself, from the Victron as VRM has it and from
+        the Deye inverter, whether this service runs or not, so the two never send the same."""
+        if self._settings.edge_url:
+            return []
         source = self._settings.source(source_name)
         return self._fan_out(source, render_power(transition, snapshot, now, source.lang), now)

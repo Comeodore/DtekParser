@@ -38,6 +38,19 @@ at the address with its changes. Power going off or coming back stays with the h
   started) first asks the worker (`POST /claim/<source>`). If the reserve took over meanwhile,
   the worker hands over the baseline it went on with and stops; the home service detects from
   that baseline, so what the reserve sent is not sent again and only later news follows.
+- **Power gone or back: from here alone (05.11.2026).** Each source's object watches the power at
+  its address and sends the messages that it is gone or back, whether the home service runs or
+  not: kem from its Victron (svitlo-edge's VRM read; the GX logs once a minute, and since 05.11
+  svitlo-edge reads a few seconds after each log becomes readable, learning that lag, and says when
+  it reads next, which kem's look follows by 3 s), krem from its Deye inverter's grid voltage
+  (≥ 100 V, every 90 s, the logger uploads every ~72 s). dtek-brain's `power` judges and words them with the home service's own `next_state`
+  and `render_power` (duration, battery, the schedule's end or "unscheduled", DTEK's notice);
+  they go through the same outbox, kept 6 h, as at home. A first look only sets the state (`power`
+  in storage). The home service sends none of them while `EDGE_URL` is set (Router.for_grid) and
+  says so in each push (`power_messages: false`); a home service of before that still sends its
+  own, and while it is alive this side stays quiet, so the two never send the same. They come a
+  minute or two after the change rather than seconds, as Home Assistant did. krem's state was
+  seeded once on 05.11 (grid gone since 00:30, from Deye's 5-minute history).
 - **The schedules themselves.** While the home service runs, its mini app shows today's and
   tomorrow's schedules; it is down with it. So while the reserve is in charge, the chats also get
   the schedules as text ("Графік на сьогодні" / "Today's schedule") whenever they have not seen
@@ -47,10 +60,6 @@ at the address with its changes. Power going off or coming back stays with the h
   from the turn, so a home service that comes and goes does not make the reserve repeat it. Added
   on 04.11.2026, after kem's emergency without schedules turned into an outage by the schedule at
   11:09 and the kem chats, with the lab off, had no way to see the day.
-- **Outages by the schedule, kem only.** DTEK's notice of an outage the schedule applies
-  ("Стабілізаційне відключення (Згідно графіку…)") is no message of the home service: the mini app
-  shows it. While the reserve is in charge, kem's chats get it as text too: its start, a new end
-  and its end (`scheduled_notices` in `SOURCES`, worker.js). krem stays as at home.
 - **The mini app, stood in for (05.11.2026).** `dtek-schedule.comeodore.services` (kem) and
   `dtek-krem-schedule.comeodore.services` (krem) are Worker routes to this worker. Every request goes
   on to the home service through the tunnel as before; only when that answers 530 (no tunnel), 502–504
@@ -59,11 +68,16 @@ at the address with its changes. Power going off or coming back stays with the h
   the last good read (kept as `house`, `read_at`), with `reserve: true`, which the page shows as a
   note with the time of that read. For kem it also has the power really there and the batteries row:
   the Victron from svitlo-edge (its `Power` entrypoint, over the `POWER` service binding: grid, since
-  when, SOC and battery power from VRM, read there every 30 s) and the building's Deye inverters
-  (Elevator, Water), read from Deye Cloud at most once a minute with the token the home service
-  pushes with kem's baseline (`deye` in the push, app/edge.py), so they appear only once the home
-  service has pushed it. krem's page has the schedule and DTEK's status, without the inverter diagram.
-  One dtek-brain call serves the page for 20 s.
+  when, SOC and battery power from VRM, read there right after each GX log) and the building's Deye inverters
+  (Elevator, Water). krem's page has the inverter diagram of Круглик (2511090098), without what
+  needs the home service: today's grid by tariff (it shows the total), the sun forecast and until
+  when the battery lasts. All three inverters come from one device/latest call (Deye counts calls),
+  made by the kem object at most once a minute and only while a page asks; krem asks the kem object.
+  Its token is the one the home service pushes with kem's baseline (`deye` in the push, app/edge.py)
+  while that is good, else one of its own from the secrets `DEYE_APP_ID`, `DEYE_APP_SECRET`,
+  `DEYE_EMAIL`, `DEYE_PASSWORD_SHA256` (the home service's `DEYE_*`), kept in its storage until a
+  day before it expires. dtek-brain parses the readings with the home service's own
+  `app/inverter/reading.py`. One dtek-brain call serves a page for 20 s.
 - **Nothing piles up.** dtek-service now drops DTEK's news it could not deliver within 15
   minutes (`EVENT_TTL`) instead of 6 hours: after an outage its next cycle reports the difference
   as it is then.
