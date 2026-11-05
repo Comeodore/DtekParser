@@ -127,6 +127,43 @@ minutes with the lease of 10 minutes it then had. The user had it cut to 5 minut
 05.11.2026 the cron wakes the object within a minute of the lease running out, and the object reads at
 once, so the first read after the home service went quiet comes 5 to 6 minutes after its last push.
 
+## No Durable Object while home is alive (05.11.2026)
+
+Until 05.11.2026 every push of the home service was a call to its source's object, and the objects read
+DTEK every 5 minutes and watched the power all the time: ~3,000 Durable Object requests a day and a
+loop that never slept, on an account where airdanger's Poller takes ~83% of the free time. Since then
+(commit 1bfc65e, deployed 03:40 Kyiv) the objects run only while the home service is away, and the
+power is watched only then too, from the cron. Measured per 15 minutes (GraphQL, Kyiv time):
+
+| | DO requests | DO GB-s |
+| --- | --- | --- |
+| before, the home service pushing (03:00–03:40) | 36, 34, 24 | 0.16–0.34 |
+| after, the home service alive (03:42–03:59) | 0 | 0 |
+
+The cron then takes 1–3 ms of CPU a run (D1 alone), a push 1–3 ms.
+
+The takeover tested the same night, dtek-service stopped from 03:55:54 to 04:05:07 (Kyiv time), its last
+push at 03:55:43:
+- **Power.** Watched from 04:01:23, the first cron 5 minutes after the last sign of life, from the
+  home service's own states (kem on since 02:37:09, krem off since 00:30); VRM read as the graph
+  (~600 bytes), the cron at 5 ms of CPU.
+- **DTEK.** Both objects had been woken at 03:59:23, since both mini apps were opened at 03:58 and
+  served from here (their data still 502: no read of the objects was in D1 yet), and they took both
+  sources over on their next read, at 04:04:24. Such a read now comes no later than the lease running
+  out, so the takeover is 5 to 6 minutes after the last push either way. Nothing had changed: no
+  messages. The alarms took 9–17 ms of CPU (an object's limit is 30 s).
+- **Back.** At 04:05:08 the home service took back the power states left there (the same) and the
+  baselines ("queued 0 messages"), and sent nothing again; the objects read for the open page another
+  10 minutes and went to sleep.
+
+Found on the way: the objects' alarms had stood in the past since 04.11.2026 23:50 UTC (the Durable
+Object time ran out then, and the alarms never fired afterwards, while `getAlarm()` still returned
+them), so the old loop had not read since; the cron now re-arms an alarm more than 2 minutes late. And
+at the deploy D1 had no pushes yet, so the first cron took the home service for away and watched the
+power from a first look, which the home service's start then took over as its own (kem and krem
+"since" an hour off, restored by hand from VRM and Deye): a source never heard from is no longer taken
+for away, and a state only first seen here is not handed back.
+
 ## How it reads DTEK
 
 Incapsula challenges only the HTML page; `POST /ua/ajax` reaches the site. A request without a

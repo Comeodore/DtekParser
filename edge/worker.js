@@ -553,6 +553,12 @@ export class Watcher extends DurableObject {
       console.error(`${source}: ${e}`);
       if (nextRead <= Date.now()) nextRead = Date.now() + INTERVAL_MIN * 60 * 1000;
     } finally {
+      // Reading while the home service is still in charge (for a page): the next read comes no later than its lease
+      // running out, so that the takeover is not a whole interval late (04:04 instead of 04:01 in the test of
+      // 05.11.2026).
+      if (reads && !edge.since && home?.at && home.at + LEASE_MS > Date.now()) {
+        nextRead = Math.min(nextRead, home.at + LEASE_MS + 2000);
+      }
       await this.ctx.storage.put("next_read", nextRead);
       const send = nextSend(await this.ctx.storage.get("outbox"), Date.now() + 1000);
       const at = Math.min(reads ? nextRead : Infinity, send ?? Infinity);
