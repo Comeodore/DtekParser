@@ -2,8 +2,9 @@
 // 02.11.2026);
 // `npx wrangler deploy` from this folder gives the same Worker. Secrets, set once with
 // `npx wrangler secret put <NAME>`: the addresses KEM_STREET KEM_BUILDING KREM_SETTLEMENT KREM_STREET
-// KREM_BUILDING, EDGE_KEY, the key the home service sends (its EDGE_KEY in .env), and its Deye Cloud credentials
-// DEYE_APP_ID DEYE_APP_SECRET DEYE_EMAIL DEYE_PASSWORD_SHA256 (as in .env), for the stand-in mini apps.
+// KREM_BUILDING, EDGE_KEY, the key the home service sends (its EDGE_KEY in .env), its Deye Cloud credentials
+// DEYE_APP_ID DEYE_APP_SECRET DEYE_EMAIL DEYE_PASSWORD_SHA256 (as in .env), and VRM_TOKEN, a VRM access token
+// for kem's Victron (VRM → Preferences → Integrations → Access tokens; svitlo-edge's until 05.11.2026).
 // dtek-brain (brain.py) is a Python Worker of its own, uploaded from what bundle.py packs; deploy it first.
 {
   "name": "dtek-edge",
@@ -13,16 +14,14 @@
   "workers_dev": true,
   "observability": { "enabled": true },
   // live: takes a source over while the home service is away; test: runs the reserve always, to TEST_CHAT_ID only.
-  "vars": { "MODE": "live", "TEST_CHAT_ID": "" },
-  // Re-arms the polling loop if it ever stops; the reads themselves run on the object's alarm.
-  "triggers": { "crons": ["*/10 * * * *"] },
+  // VRM_SITE_ID: kem's VRM installation.
+  "vars": { "MODE": "live", "TEST_CHAT_ID": "", "VRM_SITE_ID": "514696" },
+  // From D1 alone while the home service is alive: wakes a source's object once it must read DTEK, and watches the
+  // power (VRM, Deye) while the home service is away.
+  "triggers": { "crons": ["* * * * *"] },
   "durable_objects": { "bindings": [{ "name": "WATCHER", "class_name": "Watcher" }] },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Watcher"] }],
-  // POWER: svitlo-edge's Power entrypoint, the kem Victron from VRM for the stand-in mini app.
-  "services": [
-    { "binding": "BRAIN", "service": "dtek-brain" },
-    { "binding": "POWER", "service": "svitlo-edge", "entrypoint": "Power" }
-  ],
+  "services": [{ "binding": "BRAIN", "service": "dtek-brain" }],
   // The mini apps' hosts: passed on to the home service, stood in for while it does not answer (worker.js standIn).
   "routes": [
     { "pattern": "dtek-schedule.comeodore.services/*", "zone_name": "comeodore.services" },

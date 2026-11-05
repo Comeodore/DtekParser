@@ -83,10 +83,7 @@ class Router:
 
     def for_grid(self, source_name: str, transition: PowerTransition, snapshot: Optional[Snapshot],
                  now: datetime) -> list[OutgoingMessage]:
-        """Power lost or back at a source's address, however it was noticed (HA voltage, Deye grid). None while the
-        reserve on Cloudflare (edge/) is configured: it sends these itself, from the Victron as VRM has it and from
-        the Deye inverter, whether this service runs or not, so the two never send the same."""
-        if self._settings.edge_url:
-            return []
+        """Power lost or back at a source's address, however it was noticed (HA voltage, Deye grid). The reserve on
+        Cloudflare (edge/) sends these only while this service is away (app/edge.py)."""
         source = self._settings.source(source_name)
         return self._fan_out(source, render_power(transition, snapshot, now, source.lang), now)

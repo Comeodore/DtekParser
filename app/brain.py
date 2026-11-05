@@ -10,13 +10,13 @@ tomorrow's schedule as text each time they are first seen or come to differ from
 shown, even when there is no change to report: on taking a source over, when schedules apply again after an
 emergency without them, when tomorrow is published with no outages.
 
-The messages that the power is gone or back come from here alone (`power`), whether this service runs or not:
-kem's from its Victron as VRM has it (svitlo-edge), krem's from its Deye inverter, judged and worded as this
-service did with Home Assistant and the inverter, which no longer send them while the reserve is configured.
+While this service is away the reserve also says when the power is gone or back (`power`): kem's from its Victron
+as VRM has it, krem's from its Deye inverter, judged and worded as this service does with Home Assistant and the
+inverter, going on from the state this service last pushed.
 
 The mini app itself is stood in for as well: `page` gives its data from the reserve's last read, with kem's
-Victron as VRM has it (svitlo-edge) for the power really there and the home battery, the building's Deye
-inverters in kem's batteries row and krem's inverter diagram, from Deye Cloud.
+Victron as VRM has it for the power really there and the home battery, the building's Deye inverters in kem's
+batteries row and krem's inverter diagram, from Deye Cloud.
 """
 from __future__ import annotations
 
@@ -109,7 +109,7 @@ def deye_readings(deye: Optional[dict]) -> dict[str, InverterReading]:
 def power_now(victron: Optional[dict], deye: Optional[dict], now: datetime) -> tuple[Optional[Actual], list[dict]]:
     """The power really there and the batteries row, from what the worker read for the page.
 
-    victron: svitlo-edge's last VRM read of the home's Victron: grid (true, false or null), grid_since, grid_at,
+    victron: the worker's last VRM read of the home's Victron: grid (true, false or null), grid_since, grid_at,
     soc, battery_w (positive while charging), battery_at; times in ms.
     deye: the inverters from Deye Cloud: `items` (device/latest's deviceDataList), `batteries` ([name, serial] in
     DEYE_BATTERIES' order) and `min_grid_voltage`.
@@ -168,11 +168,24 @@ def _ms(at: datetime) -> int:
     return int(at.timestamp() * 1000)
 
 
+def _context(request: dict) -> Optional[Snapshot]:
+    """The schedule a power message is worded with: the reserve's last read of DTEK (building, answer, fact, names,
+    read_at), else the home service's last pushed `baseline` (its days and DTEK's notice, as of read_at), else
+    none."""
+    if request.get("answer"):
+        return _snapshot(request, _at(request["read_at"]))
+    baseline = Baseline.from_dict(request.get("baseline"))
+    if baseline is None:
+        return None
+    return Snapshot(request["source"], _at(request.get("read_at") or request["now"]), (),
+                    tuple(baseline.days.values()), baseline.outage, "", "")
+
+
 def power(request: dict) -> dict:
     """The power at a source's address, observed by the worker: request: source, now (ms), lang, `state` (the
-    reply's `state` of the call before; null at first), `observed` (on, at: when the reading that shows it was
-    taken, ms; battery: "71%" or "N/A") and the last read of DTEK (building, answer, fact, names, read_at) for the
-    schedule's context. Returns the next `state` and the message, if the power changed.
+    reply's `state` of the call before, or the home service's last; null at first), `observed` (on, at: when the
+    reading that shows it was taken, ms; battery: "71%" or "N/A") and the schedule's context (see _context).
+    Returns the next `state` and the message, if the power changed.
 
     As at home: a first observation only sets the state; a reading is judged at its own time, so a minute-old one
     is no late notice."""
@@ -185,8 +198,7 @@ def power(request: dict) -> dict:
                                    observed.get("battery") or "N/A", from_snapshot=False)
     texts = []
     if transition is not None:
-        snapshot = _snapshot(request, _at(request["read_at"])) if request.get("answer") else None
-        texts.append(render_power(transition, snapshot, now, request["lang"]))
+        texts.append(render_power(transition, _context(request), now, request["lang"]))
     return {"state": {"on": state.status is PowerStatus.ON, "since": _ms(state.since)}, "texts": texts}
 
 

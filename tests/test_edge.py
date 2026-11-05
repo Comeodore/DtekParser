@@ -13,7 +13,7 @@ from app.engine.events import ScheduleChange, ScheduleEvent
 from app.inverter.reading import parse_device_latest
 from app.notify.messages import render_power
 from app.notify.router import Router
-from app.power.state import PowerStatus, PowerTransition
+from app.power.state import PowerState, PowerStatus, PowerTransition
 from app.storage.memory import MemoryStore
 from tests.conftest import BASE_ENV, kyiv, one
 from tests.test_collector import DAY_OCT1, DAY_OCT2, FakeSite, fact, hours, texts
@@ -30,11 +30,14 @@ class FakeEdge(Edge):
         self.calls = []
         self.up = True
         self.reserve = None     # the baseline the reserve went on with, handed over once
+        self.power_left = {}    # per source, the power state the reserve left, handed over once
 
     async def _post(self, source, action, body):
         self.calls.append((action, source, copy.deepcopy(body)))
         if not self.up:
             return None
+        if action == "claim" and body.get("power"):
+            return {"power": self.power_left.pop(source, None)}
         if action == "claim":
             baseline, self.reserve = self.reserve, None
             return {"baseline": baseline}
@@ -84,15 +87,61 @@ async def test_every_good_cycle_pushes_the_baseline_bot_and_chats(pipeline):
     assert push["baseline"] == store.data.sources["kem"].baseline
     assert (push["token"], push["chat_ids"], push["lang"], push["notify_outages"]) == ("1:a", ["111", "222"], "en", True)
     assert push["fingerprint"] == collector.config.fingerprint
-    # The power messages are the reserve's.
-    assert push["power_messages"] is False
+    # No power state held for the source, none pushed.
+    assert "power" not in push
 
 
-async def test_failed_cycle_does_not_push(pipeline):
-    collector, site, _, _, edge = pipeline
+async def test_failed_cycle_only_says_it_is_alive(pipeline):
+    collector, site, _, clock, edge = pipeline
     site.fail = True
     assert not await collector.cycle()
-    assert edge.calls == []
+    # No news of DTEK to push, but the power is still watched here; once a minute at most.
+    assert edge.calls == [("home", "kem", {"alive": True})]
+    clock["now"] += timedelta(seconds=30)
+    await collector.cycle()
+    assert len(edge.calls) == 1
+    clock["now"] += timedelta(seconds=31)
+    await collector.cycle()
+    assert edge.actions() == ["home", "home"]
+    # A good cycle claims and pushes as before, and counts as heard from.
+    site.fail = False
+    await collector.cycle()
+    assert edge.actions()[-2:] == ["claim", "home"] and "baseline" in edge.calls[-1][2]
+    site.fail = True
+    clock["now"] += timedelta(seconds=30)
+    await collector.cycle()
+    assert len(edge.calls) == 4
+
+
+async def test_pushes_carry_the_power_state_the_reserve_goes_on_from(pipeline):
+    collector, site, _, clock, edge = pipeline
+    state = PowerState(PowerStatus.OFF, kyiv(2026, 10, 1, 17, 5))
+    edge.power = lambda source: state if source == "kem" else None
+    await collector.cycle()
+    assert edge.calls[-1][2]["power"] == {"on": False, "since": ms(kyiv(2026, 10, 1, 17, 5))}
+    site.fail = True
+    clock["now"] += timedelta(minutes=2)
+    await collector.cycle()
+    assert edge.calls[-1][2] == {"alive": True, "power": {"on": False, "since": ms(kyiv(2026, 10, 1, 17, 5))}}
+
+
+async def test_a_start_takes_back_the_power_the_reserve_watched():
+    store, edge = MemoryStore(), FakeEdge()
+    async with store.transaction() as tx:
+        await tx.save_power_state(PowerState(PowerStatus.ON, kyiv(2026, 10, 1, 7, 30)), 1)
+        await tx.save_power_state(PowerState(PowerStatus.ON, kyiv(2026, 10, 1, 6, 0)), 2)
+    # The reserve saw kem's power go at 19:01 while the service was away, and watched krem's without a change.
+    edge.power_left = {"kem": {"on": False, "since": ms(kyiv(2026, 10, 1, 19, 1))}}
+    await edge.take_back_power(store, [("kem", 1), ("krem", 2)])
+    assert [(a, s, b) for a, s, b in edge.calls] == [("claim", "kem", {"power": True}), ("claim", "krem", {"power": True})]
+    async with store.transaction() as tx:
+        assert await tx.load_power_state(1) == PowerState(PowerStatus.OFF, kyiv(2026, 10, 1, 19, 1))
+        assert await tx.load_power_state(2) == PowerState(PowerStatus.ON, kyiv(2026, 10, 1, 6, 0))
+    # A reserve out of reach leaves the stored states as they were.
+    edge.up, edge.power_left = False, {"kem": {"on": True, "since": ms(kyiv(2026, 10, 1, 20, 0))}}
+    await edge.take_back_power(store, [("kem", 1)])
+    async with store.transaction() as tx:
+        assert await tx.load_power_state(1) == PowerState(PowerStatus.OFF, kyiv(2026, 10, 1, 19, 1))
 
 
 async def test_back_after_the_reserve_took_over_sends_nothing_twice(pipeline):
@@ -349,11 +398,45 @@ def test_reserve_power_messages_are_the_home_services():
     assert back["texts"][0].startswith("🟢") and "38%" in back["texts"][0] and "1h 45m" in back["texts"][0]
 
 
-def test_home_sends_no_power_messages_while_the_reserve_is_configured():
+def test_reserve_words_the_power_from_the_pushed_baseline():
+    site = FakeSite()
+    site.fact = fact("01.10.2026 06:50", {DAY_OCT1: {"GPV4.1": hours(19, 20)}})
+    # The home service's baseline as it pushed it, before it went away.
+    baseline = reserve_read(site, {"baseline": None, "fingerprint": "f", "lang": "en", "notify_outages": True},
+                            kyiv(2026, 10, 1, 18, 0))["baseline"]
+    state = {"on": True, "since": ms(kyiv(2026, 10, 1, 7, 30))}
+    off = brain.power({"source": "kem", "now": ms(kyiv(2026, 10, 1, 19, 2)), "lang": "en", "building": "43",
+                       "baseline": baseline, "read_at": ms(kyiv(2026, 10, 1, 18, 0)), "state": state,
+                       "observed": {"on": False, "at": ms(kyiv(2026, 10, 1, 19, 1)), "battery": "71%"}})
+    # The same words as from a read of its own: off by the schedule, until 21:00.
+    assert off["texts"] == power_call(site, kyiv(2026, 10, 1, 19, 2), state, False, kyiv(2026, 10, 1, 19, 1))["texts"]
+    assert "21:00" in off["texts"][0]
+    # With neither, the message has no schedule to go by.
+    bare = brain.power({"source": "kem", "now": ms(kyiv(2026, 10, 1, 19, 2)), "lang": "en", "state": state,
+                        "observed": {"on": False, "at": ms(kyiv(2026, 10, 1, 19, 1)), "battery": "71%"}})
+    assert "21:00" not in bare["texts"][0]
+
+
+def test_home_sends_the_power_messages_with_the_reserve_configured():
     transition = PowerTransition(PowerStatus.OFF, kyiv(2026, 10, 1, 19, 1), kyiv(2026, 10, 1, 7, 30), "71%", False)
     plain = Router(load_settings(BASE_ENV))
     assert len(plain.for_power(transition, None, kyiv(2026, 10, 1, 19, 2))) == 2
     with_reserve = Router(load_settings({**BASE_ENV, "EDGE_URL": "https://edge.test", "EDGE_KEY": "k"}))
-    assert with_reserve.for_power(transition, None, kyiv(2026, 10, 1, 19, 2)) == []
-    assert with_reserve.for_grid("krem", transition, None, kyiv(2026, 10, 1, 19, 2)) == []
+    assert len(with_reserve.for_power(transition, None, kyiv(2026, 10, 1, 19, 2))) == 2
 
+
+
+def test_the_service_pushes_the_power_it_messages():
+    from app.service import Service
+    from tests.test_inverter import DEYE_ENV
+    env = {**BASE_ENV, **DEYE_ENV, "EDGE_URL": "https://edge.test", "EDGE_KEY": "k"}
+    service = Service(load_settings(env), store=MemoryStore(), gateway=object())
+    # kem's from Home Assistant (row 1), krem's from its Deye inverter (row 2).
+    assert service.power_slots() == [("kem", 1), ("krem", 2)]
+    service.power._state = PowerState(PowerStatus.ON, kyiv(2026, 10, 1, 7, 30))
+    service.inverter._grid = PowerState(PowerStatus.OFF, kyiv(2026, 10, 1, 6, 0))
+    assert service.edge.power("kem") == service.power.state
+    assert service.edge.power("krem") == service.inverter.grid
+    # An inverter whose grid this service does not message: neither does the reserve.
+    quiet = Service(load_settings({**env, "DEYE_NOTIFY_GRID": "false"}), store=MemoryStore(), gateway=object())
+    assert quiet.power_slots() == [("kem", 1)] and quiet.edge.power("krem") is None

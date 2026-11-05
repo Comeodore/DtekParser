@@ -1,8 +1,8 @@
 """dtek-brain: dtek-service's own detection and texts (app/brain.py), for the reserve in worker.js.
 
 A Python Worker that bundle.py packs with the app modules app/brain.py imports; worker.js calls `process` (each
-read), `power` (the power gone or back) and `page` (the mini app, while the home service's is down) over a service
-binding. Python Workers come without tzdata, so Europe/Kyiv is bundled as its tz file.
+read), `power` (the power gone or back while the home service is away) and `page` (the mini app, while the home
+service's is down) over a service binding. Python Workers come without tzdata, so Europe/Kyiv is bundled as its tz file.
 """
 import base64
 import json
@@ -54,6 +54,10 @@ def warm_up() -> None:
             observed = {"on": on, "at": request["now"], "battery": "80%"}
             reply = brain.power(dict(request, lang=lang, read_at=request["now"], state=state, observed=observed))
             json.dumps(reply)
+            # Worded from the home service's pushed baseline, as at the start of the reserve's turn.
+            pushed = {key: value for key, value in request.items() if key not in ("answer", "fact", "names")}
+            json.dumps(brain.power(dict(pushed, lang=lang, baseline=first["baseline"], read_at=request["now"],
+                                        state=state, observed=observed)))
 
 
 warm_up()

@@ -2,55 +2,73 @@
 
 The schedules keep coming when the homelab is off: `dtek-edge` reads DTEK from a
 Cloudflare Worker, without a browser, and while the home service is away it messages that
-service's chats with DTEK's news in its place, through the same bots and in the same words. It
+service's chats in its place, with DTEK's news and the power gone or back, through the same bots
+and in the same words. It
 started on 01.11.2026 as a test that only read (as `dtek-watch-test`, in `cf-watch/`), and has been the
 reserve since 02.11.2026; renamed `dtek-edge` on 04.11.2026.
 
-Since 02.11.2026 it polls the way airdanger's edge does: a Durable Object (`Watcher`, one per
-source, kem and krem) reads, then sets its alarm for the next read 5 minutes later. The cron
-(`*/10 * * * *`) only re-arms the loop if it ever stops. Before that each read was a cron run,
-and cron runs land in a random Cloudflare data center (30 of them in 3 hours, Warsaw 6 times out
-of 379), so the site saw one visitor hop between continents. The Durable Object is created with
-the location hint `eeur` and stays where it was placed (Frankfurt, despite the hint); it logs
-its data center and outgoing address (`colo`, `ip`) once an hour.
+Since 05.11.2026 it spends nothing of the account's free Durable Object time while the home service
+is alive (see "No Durable Object while home is alive" below). The reading itself is still the way
+airdanger's edge polls, but only while it is needed: a Durable Object (`Watcher`, one per source,
+kem and krem) reads, then sets its alarm for the next read 5 minutes later, and with nothing left to
+do it sets none and sleeps. Cron runs land in a random Cloudflare data center (30 of them in 3 hours,
+Warsaw 6 times out of 379), so a read from the cron would show the site one visitor hopping between
+continents; the Durable Object, created with the location hint `eeur`, stays where it was placed
+(Frankfurt, despite the hint) and keeps its cookies, and logs its data center and outgoing address
+(`colo`, `ip`) once an hour.
 
 ## Taking turns with the home service
 
-Only one side messages a source's chats at a time, and only DTEK's news goes through the
-reserve: schedules published, changed or cancelled, and the emergency or planned outage notice
-at the address with its changes. Power going off or coming back stays with the home service.
+Only one side messages a source's chats at a time. While the home service runs, it does everything:
+DTEK's news, the power gone or back, the mini apps. The reserve steps in for what it can only once
+the home service has gone quiet.
 
 - **The home service pushes.** After each good cycle (a successful DTEK read, about once a
   minute) a source of dtek-service sends the worker its detector baseline and the source's bot
-  token, chats, language and `notify_outages` (`POST /home/<source>`, app/edge.py). The bots and
-  chats therefore always are the ones in the home `.env`. The pushes are also how the worker
-  knows the home service is alive: they go out to `workers.dev`, so a broken tunnel does not
-  count as the service being away, while a home service that cannot read DTEK stops pushing.
-- **The reserve takes over.** With `MODE=live`, a source whose last push is 5 minutes old
-  (`LEASE_MIN`) is taken over on the next read: from then on every read goes through
-  `dtek-brain`, starting from the last pushed baseline, and the texts go to the same chats
+  token, chats, language, `notify_outages`, the power state it holds for the source (`power`: on,
+  since when) and, for kem, its Deye token (`deye`) (`POST /home/<source>`, app/edge.py). A cycle that
+  failed sends only a sign of life with the power state (`{alive: true, power}`, at most once a
+  minute). The worker keeps them in D1 (`home`: `at` the last good push, `alive_at` the last of any
+  kind, `body` the push), and nothing else: no Durable Object is woken. The pushes go out to
+  `workers.dev`, so a broken tunnel does not count as the service being away.
+- **The cron, every minute, reads D1 only** (`home`, `edge`, `kv`) and does more only for a source
+  whose home service has gone quiet: it wakes that source's object once the object must read
+  (readsWanted: the last good push is 5 minutes old, or the reserve has the turn, or a stand-in page
+  was asked for in the last 10 minutes) and its loop is not running (`edge.loop_at`, the object's next
+  alarm, missing or more than 2 minutes behind), and it watches the power (below). A source never
+  heard from (no `home` row) is not taken for one away.
+- **The reserve takes over DTEK's news.** With `MODE=live`, the object woken for a source whose last
+  good push is 5 minutes old (`LEASE_MIN`) takes it over on that read: from then on every read goes
+  through `dtek-brain`, starting from the last pushed baseline, and the texts go to the same chats
   through the same bot. `dtek-brain` (brain.py, a Python Worker on a service binding) runs the
   home service's own parser, detector and message texts (app/brain.py), so it decides and
   writes exactly as the home service would. It is asked only when the read differs from the
   last one (or a day or a notice is being confirmed gone); messages go out in runs of their own,
-  three at a time, and are dropped after 15 minutes undelivered.
+  three at a time, and are dropped after 15 minutes undelivered. Taking over, the object first notes
+  it in D1 (`edge.since`).
 - **The home service claims it back.** A source that has not pushed for 3 minutes (or just
-  started) first asks the worker (`POST /claim/<source>`). If the reserve took over meanwhile,
-  the worker hands over the baseline it went on with and stops; the home service detects from
-  that baseline, so what the reserve sent is not sent again and only later news follows.
-- **Power gone or back: from here alone (05.11.2026).** Each source's object watches the power at
-  its address and sends the messages that it is gone or back, whether the home service runs or
-  not: kem from its Victron (svitlo-edge's VRM read; the GX logs once a minute, and since 05.11
-  svitlo-edge reads a few seconds after each log becomes readable, learning that lag, and says when
-  it reads next, which kem's look follows by 3 s), krem from its Deye inverter's grid voltage
-  (≥ 100 V, every 90 s, the logger uploads every ~72 s). dtek-brain's `power` judges and words them with the home service's own `next_state`
-  and `render_power` (duration, battery, the schedule's end or "unscheduled", DTEK's notice);
-  they go through the same outbox, kept 6 h, as at home. A first look only sets the state (`power`
-  in storage). The home service sends none of them while `EDGE_URL` is set (Router.for_grid) and
-  says so in each push (`power_messages: false`); a home service of before that still sends its
-  own, and while it is alive this side stays quiet, so the two never send the same. They come a
-  minute or two after the change rather than seconds, as Home Assistant did. krem's state was
-  seeded once on 05.11 (grid gone since 00:30, from Deye's 5-minute history).
+  started) first asks the worker (`POST /claim/<source>`). The claim goes to the object only while it
+  may have the turn (`edge.since`, or the last good push at least 4 minutes old); then, if the
+  reserve took over meanwhile, the object hands over the baseline it went on with and stops, and the
+  home service detects from that baseline, so what the reserve sent is not sent again and only later
+  news follows. With the home service in charge again the object sleeps after its next alarm.
+- **Power gone or back: home first, the reserve only while it is away (05.11.2026).** The home
+  service sends these while it runs (Home Assistant for kem, the Deye inverter for krem). Once a
+  source has not been heard from at all for 5 minutes (`alive_at`: no push and no sign of life), the
+  cron watches the power at its address itself, with no Durable Object: kem's Victron from VRM every
+  minute (the graph of three attributes for the last 10 minutes, ~600 bytes: AC input 471, SOC 144,
+  battery power 243; `VRM_TOKEN`, `VRM_SITE_ID` 514696), krem's inverter (grid voltage ≥ 100 V) from
+  Deye's `device/latest` at most every 90 s (each cron that is 90 s past the last call; all three
+  inverters in one call), going on from the state the home service last pushed. A change is judged
+  and worded by dtek-brain's `power` with the home service's own `next_state` and `render_power`
+  (duration, battery, the schedule's end or "unscheduled", DTEK's notice; the schedule of the
+  object's last read, or of the home service's last baseline when that is newer) and queued in the
+  source's object, which sends it with DTEK's news, kept 6 h as at home. A turn with no pushed state
+  only sets one at its first look (`first`). A home service that starts claims the power back before
+  it watches it again (`POST /claim/<source>` with `{"power": true}`, Edge.take_back_power): it keeps
+  the state left here (not a `first` one), so a change the reserve has reported is not reported
+  again. This took over svitlo-edge's VRM reading (svitlo-edge, with its SvitloBot pings, was deleted
+  on 05.11.2026; the user had removed the SvitloBot channel).
 - **The schedules themselves.** While the home service runs, its mini app shows today's and
   tomorrow's schedules; it is down with it. So while the reserve is in charge, the chats also get
   the schedules as text ("Графік на сьогодні" / "Today's schedule") whenever they have not seen
@@ -64,38 +82,38 @@ at the address with its changes. Power going off or coming back stays with the h
   `dtek-krem-schedule.comeodore.services` (krem) are Worker routes to this worker. Every request goes
   on to the home service through the tunnel as before; only when that answers 530 (no tunnel), 502–504
   or 520–524, or not within 8 s, `/` is the same page (app/static/index.html, uploaded with the
-  worker as a Text module) and `/api/v1/schedule` comes from here: dtek-brain's `page` builds it from
-  the last good read (kept as `house`, `read_at`), with `reserve: true`, which the page shows as a
-  note with the time of that read. For kem it also has the power really there and the batteries row:
-  the Victron from svitlo-edge (its `Power` entrypoint, over the `POWER` service binding: grid, since
-  when, SOC and battery power from VRM, read there right after each GX log) and the building's Deye inverters
-  (Elevator, Water). krem's page has the inverter diagram of Круглик (2511090098), without what
-  needs the home service: today's grid by tariff (it shows the total), the sun forecast and until
-  when the battery lasts. All three inverters come from one device/latest call (Deye counts calls),
-  made by the kem object at most once a minute and only while a page asks; krem asks the kem object.
-  Its token is the one the home service pushes with kem's baseline (`deye` in the push, app/edge.py)
-  while that is good, else one of its own from the secrets `DEYE_APP_ID`, `DEYE_APP_SECRET`,
-  `DEYE_EMAIL`, `DEYE_PASSWORD_SHA256` (the home service's `DEYE_*`), kept in its storage until a
-  day before it expires. dtek-brain parses the readings with the home service's own
-  `app/inverter/reading.py`. One dtek-brain call serves a page for 20 s. The page asks once a
-  minute instead of every 10 s while its answers carry `reserve` (and leaves the owner's TOU table
-  alone, which only the home service has), since every ask is a request of the account's free
-  100,000 a day, to Workers and to Durable Objects alike (airdanger's alarm alone makes ~43,000 of
-  the latter). Both routes fail open (`request_limit_fail_open`, 05.11.2026): past the daily
-  Workers limit they go straight to the tunnel as before, not to error 1027.
+  worker as a Text module) and `/api/v1/schedule` comes from here, built from D1 alone: dtek-brain's
+  `page` from the object's last good read (`edge.read`: the house, `read_at`, the house's part of the
+  fact), with `reserve: true`, which the page shows as a note with the time of that read. For kem it
+  also has the power really there and the batteries row: the Victron as the cron last read it from VRM
+  (`kv.victron`) and the building's Deye inverters (Elevator, Water); krem's page has the inverter
+  diagram of Круглик (2511090098), without what needs the home service: today's grid by tariff (it
+  shows the total), the sun forecast and until when the battery lasts. The Deye readings are the cron's
+  (`kv.deye`), with the token the home service pushes with kem's baseline while that is good, else one
+  of its own from the secrets `DEYE_APP_ID`, `DEYE_APP_SECRET`, `DEYE_EMAIL`, `DEYE_PASSWORD_SHA256`
+  (the home service's `DEYE_*`), kept in `kv` until a day before it expires. dtek-brain parses the
+  readings with the home service's own `app/inverter/reading.py`. A page served here marks itself
+  wanted (`edge.page_at`, at most once a minute), and for 10 minutes the cron reads the Victron and
+  Deye and the object DTEK for it, in case the home service is alive and only the tunnel is down. One
+  dtek-brain call serves a page for 20 s in an isolate. The page asks once a minute instead of every
+  10 s while its answers carry `reserve`, and leaves the owner's TOU table alone, which only the home
+  service has. Both routes fail open (`request_limit_fail_open`, 05.11.2026): past the daily Workers
+  limit they go straight to the tunnel as before, not to error 1027.
 - **Nothing piles up.** dtek-service now drops DTEK's news it could not deliver within 15
   minutes (`EVENT_TTL`) instead of 6 hours: after an outage its next cycle reports the difference
   as it is then.
 
 Both ends fail open: a home service that cannot reach the worker works as it did without it,
 and would rather repeat a message than lose one. A duplicate is possible only when the home
-service is alive and can message Telegram but cannot reach `workers.dev` for 5 minutes.
+service is alive and can message Telegram but cannot reach `workers.dev` for 5 minutes (for the
+power: when its internet is down that long, so that its own messages go out only once it is back).
 
 `MODE=test` runs the reserve on every read regardless of the home service, from a baseline of
 its own, and sends only to `TEST_CHAT_ID`, marked "🧪 reserve". `POST /test/<source>` with
 `{"forget": "days" | "outage" | "shown" | "all"}` makes it forget what the home service has seen
 (or the schedules it showed), so the next read (at once) reports the current state as news. `POST /status/<source>` shows the last
-push (age, chats, language), the reserve's turn and the outbox; all endpoints take
+push (age, chats, language, power), the reserve's turn, the outbox, the object's alarm and the power as
+watched here; it wakes the object, so it is for checks only; all endpoints take
 `Authorization: Bearer <EDGE_KEY>`, the key in the home `.env`. Tested on 02.11.2026: both bots
 delivered to the owner's chat, kem's emergency notice in English and krem's day in Ukrainian.
 
@@ -104,9 +122,10 @@ Then live, the same day, with dtek-service stopped from 14:53 to 15:07 (Kyiv tim
 - **A real change in between.** DTEK had added 23:00–24:00 to krem's day at 14:54, after the home service stopped. The reserve sent it as "Графік на сьогодні оновлено" to the 4 krem chats at 15:06:31.
 - **Handover.** Back at 15:07, the home service claimed both sources and went on from the reserve's baseline. It sent nothing again.
 
-So while the home service is away, news can be late by up to the lease plus one read interval: 15 minutes
-with the lease of 10 minutes it then had. The user had it cut to 5 minutes the same day, so 10 minutes at
-most since.
+So while the home service is away, news could be late by up to the lease plus one read interval: 15
+minutes with the lease of 10 minutes it then had. The user had it cut to 5 minutes the same day. Since
+05.11.2026 the cron wakes the object within a minute of the lease running out, and the object reads at
+once, so the first read after the home service went quiet comes 5 to 6 minutes after its last push.
 
 ## How it reads DTEK
 
@@ -175,31 +194,36 @@ GROUP BY t.interval, t.source ORDER BY t.interval, t.source;
 ## Budget on Workers Free (shared with airdanger)
 
 Free limits are per account and per day (UTC) unless noted; going over one makes further
-operations of that kind fail until midnight UTC, for airdanger too. airdanger as measured on
-30.10-01.11.2026; the reserve as estimated for kem and krem every 5 minutes, with the home
-service pushing each about once a minute.
+operations of that kind fail until midnight UTC, for airdanger too (on 05.11.2026 the Durable
+Objects stayed refused until 01:01 UTC, not 00:00). airdanger as measured on 30.10–05.11.2026;
+dtek-edge as designed since 05.11.2026, with the home service pushing each source about once a
+minute.
 
-| Limit (Free) | airdanger | dtek-edge + dtek-brain |
-| --- | --- | --- |
-| Worker requests, 100,000 | ~1,450 (edge cron) | ~3,000 (2 × 1,440 pushes, cron every 10 minutes, dtek-brain while in reserve) |
-| Durable Objects duration, 13,000 GB-s | ~11,000 (Poller active all day) | ~30 (0.34 s active per read, 2 × 288 reads; the pushes a few ms each) |
-| Durable Objects requests, 100,000 | ~43,000 | ~3,700 (2 × 288 alarms, 2 × 1,440 pushes, 2 × 144 cron calls) |
-| Cron triggers, 5 per account | 1 | 1 |
-| D1 rows written, 100,000 | 0 | ~600 (1 a read, 2 when the fact changes) |
-| D1 rows read, 5,000,000 | 0 | only the queries below |
-| CPU, 10 ms per invocation | edge p99 ~1.1 ms | 5 ms p50, 8 ms max per alarm (cron version: 6 p50, 12 max); dtek-brain 5-9 ms a call |
-| Subrequests, 50 per invocation | | 3 to 5 a read (DTEK once or twice, D1, dtek-brain, trace once an hour); 3 messages a send run |
+| Limit (Free) | airdanger | dtek-edge + dtek-brain, home alive | dtek-edge + dtek-brain, home away |
+| --- | --- | --- | --- |
+| Worker requests, 100,000 | ~1,450 (edge cron) | ~4,300 (2 × 1,440 pushes, 1,440 cron runs) plus the mini apps' own requests | 1,440 cron runs, dtek-brain on changes, the stand-in pages |
+| Durable Objects duration, 13,000 GB-s | ~10,800 (Poller active all day) | 0 | ~30 a day (a read every 5 minutes per source, well under a second each) |
+| Durable Objects requests, 100,000 | ~43,200 | 0 | ~700 a day (2 × 288 alarms, the sends, a wake-up) |
+| Cron triggers, 5 per account | 1 | 1 (every minute) | |
+| D1 rows written, 100,000 | 0 | ~2,900 (a push is one upsert) | ~600 reads + ~1,500 power readings |
+| D1 rows read, 5,000,000 | 0 | ~10,000 (the cron's 3 queries) | about the same |
+| CPU, 10 ms per invocation | edge p99 ~1.1 ms | push 1–3 ms; cron ~1 ms | cron: D1, VRM (~600 B), Deye (~14 KB, every other minute), D1; alarm 5 ms p50, 8 max; dtek-brain 5–9 ms a call |
+| Subrequests, 50 per invocation | | 1 | cron 3–5; a read 3 to 5 (DTEK once or twice, D1, dtek-brain, trace once an hour); 3 messages a send run |
 
 The Durable Objects duration is the tight line: airdanger's Poller is active all day and uses
-about 85% of it. A Durable Object is billed only while it runs or is held in memory unable to
-hibernate; this one only waits on its alarm, so it costs the seconds its reads take. Check it
-with GraphQL `durableObjectsPeriodicGroups` (`activeTime`, microseconds, times 0.128 GB) per
-`namespaceId`. CPU is per invocation: a read that goes over fails on its own and does not touch
-airdanger. In the cron version 3 reads of 78 went over 10 ms and still finished, which is why
-detection runs in dtek-brain's own invocation and messages in runs of their own. Pyodide makes a
-cold dtek-brain call expensive (173 ms on the first deploy, against 0.06 ms for the same work
-in CPython), so brain.py runs one pass through everything at import, which Python Workers keep
-in their snapshot; that brought a call down to 5-9 ms.
+about 83% of it, so a Durable Object anywhere else on the account that is held awake (a timer, a
+hanging call) can run it out for everyone, as on 04.11.2026. A Durable Object is billed only while
+it runs or is held in memory unable to hibernate; this one waits on its alarm, or on nothing when it
+sleeps. Check it with GraphQL `durableObjectsPeriodicGroups` (`activeTime`, microseconds, times
+0.125 GB) and `durableObjectsInvocationsAdaptiveGroups` (`requests`) per `namespaceId` (dtek-edge's is
+`eedf1aa9b3cc4f26bcfb4ba71b332a2d`, still named `dtek-watch-test_Watcher`). CPU is per invocation: a
+run that goes over fails on its own and does not touch airdanger. In the cron version 3 reads of 78
+went over 10 ms and still finished, which is why detection runs in dtek-brain's own invocation and
+messages in runs of their own; the first cron of 05.11.2026, with VRM's 105 KB diagnostics, a new
+Deye token and two wake-ups, took 18 ms, which is why VRM is read as a graph of three attributes.
+Pyodide makes a cold dtek-brain call expensive (173 ms on the first deploy, against 0.06 ms for the
+same work in CPython), so brain.py runs one pass through everything at import, which Python Workers
+keep in their snapshot; that brought a call down to 5-9 ms.
 
 ## Reading the results
 
@@ -250,19 +274,21 @@ CPU per read is in Workers Observability (`$workers.cpuTimeMs` on the `alarm` ev
 
 ## Pausing and removing it
 
-To pause, add a plain-text variable `PAUSED` = `1`: the next alarm does not set another, and the
-cron clears any that is left. Remove the variable to start again; the Durable Object keeps its
-cookies, so it is the same visitor. To begin as a new visitor, read through a new object
+To pause, add a plain-text variable `PAUSED` = `1`: the next alarm does not set another, the cron
+clears any that is left and watches no power. Remove the variable to start again; the Durable Object
+keeps its cookies, so it is the same visitor. To begin as a new visitor, read through a new object
 (another name passed to `idFromName`).
 
-To stop only the messages, set `MODE` to `off`: the worker keeps reading and taking the pushes
-but never takes a source over (claims then always answer that it did not). Removing `EDGE_URL`
+To stop only the messages, set `MODE` to `off`: the worker keeps taking the pushes and reading while
+the home service is away, but never takes a source over or watches the power (claims then always
+answer that it did not). Removing `EDGE_URL`
 and `EDGE_KEY` from the home `.env` stops the pushes; the worker, with `MODE=live`, would then
 take both sources over after 5 minutes, so set `MODE=off` first.
 
 To remove everything, delete the Workers `dtek-edge` (with its Durable Object namespace) and
 `dtek-brain`, the D1 database `dtek-edge` (`npx wrangler delete` and
-`npx wrangler d1 delete dtek-edge`), and `EDGE_URL`/`EDGE_KEY` from the home `.env`.
+`npx wrangler d1 delete dtek-edge`), and `EDGE_URL`/`EDGE_KEY` from the home `.env`. D1's `home`
+table holds the bots' tokens from the pushes (and `kv` a Deye token): the database goes with them.
 
 ## The rename (04.11.2026)
 

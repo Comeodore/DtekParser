@@ -54,3 +54,35 @@ CREATE TABLE IF NOT EXISTS facts (
   fact_update TEXT,
   body TEXT
 );
+
+-- Since 05.11.2026 the stateless side keeps what it needs here, so that nothing wakes a Durable Object while the
+-- home service is alive.
+
+-- The home service's last push per source (POST /home/<source>, app/edge.py).
+CREATE TABLE IF NOT EXISTS home (
+  source TEXT PRIMARY KEY,
+  at INTEGER,                   -- ms, the last push after a good cycle: the turn for DTEK's news follows it
+  alive_at INTEGER,             -- ms, the last push of any kind (or claim of the power): the power's turn follows it
+  body TEXT                     -- JSON, the last push after a good cycle: baseline, fingerprint, lang, notify_outages,
+                                -- chat_ids, token (the source's bot), deye (kem: the home service's Deye token),
+                                -- power ({on, since} as held at home, also updated by a sign of life)
+);
+
+-- The reserve's own per source.
+CREATE TABLE IF NOT EXISTS edge (
+  source TEXT PRIMARY KEY,
+  since INTEGER,                -- ms, the reserve has had DTEK's news since then; null while the home service has
+  loop_at INTEGER,              -- ms, the object's next alarm; null while it sleeps
+  read TEXT,                    -- JSON, the object's last good read: house, house_ts, read_at, fact and names (the
+                                -- house's groups only), for the pages and the power messages
+  power TEXT,                   -- JSON {on, since}, the power at the address as judged here
+  power_from INTEGER,           -- ms, the power has been watched here since then; null while the home service does
+  page_at INTEGER               -- ms, a stand-in page last asked for its data
+);
+
+-- victron (kem's last VRM read), deye (every inverter's last device/latest), deye_token (one of its own), vrm_site.
+CREATE TABLE IF NOT EXISTS kv (
+  name TEXT PRIMARY KEY,
+  value TEXT,                   -- JSON
+  at INTEGER
+);

@@ -12,10 +12,10 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   krem → `@dtek_parser_bot` (Ukrainian).
 - **Power.** It watches the Victron AC-input voltage in Home Assistant and
   reports outages and restores to the kem chats, with schedule context.
-  Since 05.11.2026, with the reserve configured (`EDGE_URL`), these messages
-  and the krem inverter's below come from the reserve on Cloudflare alone,
-  in the same words (edge/README.md); this service only keeps the state for
-  the mini app and deye-reserve.
+  While this service is away, the reserve on Cloudflare (`EDGE_URL`) sends
+  these and the krem inverter's below in its place, in the same words, going
+  on from the state pushed from here; on a start this service takes back the
+  state it left (edge/README.md).
 - **Inverter (krem).** It reads the Deye inverter in Круглик from Deye Cloud
   (`device/latest`) and shows in the krem mini app where the house's power
   comes from: the house in the middle, sun, grid and battery around it, the
