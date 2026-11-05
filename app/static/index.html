@@ -662,6 +662,9 @@
 
         const API_ENDPOINT = '/api/v1/schedule';
         const REFRESH_INTERVAL = 10000;
+        // While the reserve on Cloudflare answers (`reserve`), once a minute: its data changes no faster (DTEK
+        // every 5 min, the power and Deye about once a minute), and its requests count against a daily limit.
+        const RESERVE_REFRESH = 60000;
         // The owner's TOU table: the server checks Telegram's signed initData; it changes at most every few minutes.
         const TOU_ENDPOINT = '/api/v1/reserve/table';
         const TOU_REFRESH = 30000;
@@ -830,7 +833,8 @@
             isFirst: true,
             touAt: 0,               // when the TOU table was last asked for
             touKey: null,
-            touDenied: false        // not the owner (or no table here): not asked again
+            touDenied: false,       // not the owner (or no table here): not asked again
+            reserve: false          // the last answer came from the reserve on Cloudflare
         };
 
         const t = key => i18n[state.lang]?.[key] ?? i18n.en[key] ?? key;
@@ -1229,6 +1233,7 @@
                 const res = await fetch(`${API_ENDPOINT}?_t=${Date.now()}`);
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const data = await res.json();
+                state.reserve = Boolean(data.reserve);
 
                 state.lang = data.lang || 'en';
                 document.documentElement.lang = state.lang;
@@ -1238,7 +1243,8 @@
                 renderNotices(data);
                 renderInverter(data.inverter);
                 renderBatteries(data.batteries || []);
-                if (data.inverter) fetchTou();
+                // The table is the home service's alone; the reserve has none to give.
+                if (data.inverter && !data.reserve) fetchTou();
 
                 // Rebuilt only when the schedule or the highlighted hour changes, and then without the
                 // card fade-in: replacing the cards on every 10 s refresh made them jump up each time.
@@ -1290,8 +1296,11 @@
             }
             updateLabels();
             $('statusText').textContent = t('loading');
-            fetchData();
-            setInterval(fetchData, REFRESH_INTERVAL);
+            const refresh = async () => {
+                await fetchData();
+                setTimeout(refresh, state.reserve ? RESERVE_REFRESH : REFRESH_INTERVAL);
+            };
+            refresh();
         };
 
         if (document.readyState === 'loading') {

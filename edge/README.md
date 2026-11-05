@@ -77,7 +77,12 @@ at the address with its changes. Power going off or coming back stays with the h
   while that is good, else one of its own from the secrets `DEYE_APP_ID`, `DEYE_APP_SECRET`,
   `DEYE_EMAIL`, `DEYE_PASSWORD_SHA256` (the home service's `DEYE_*`), kept in its storage until a
   day before it expires. dtek-brain parses the readings with the home service's own
-  `app/inverter/reading.py`. One dtek-brain call serves a page for 20 s.
+  `app/inverter/reading.py`. One dtek-brain call serves a page for 20 s. The page asks once a
+  minute instead of every 10 s while its answers carry `reserve` (and leaves the owner's TOU table
+  alone, which only the home service has), since every ask is a request of the account's free
+  100,000 a day, to Workers and to Durable Objects alike (airdanger's alarm alone makes ~43,000 of
+  the latter). Both routes fail open (`request_limit_fail_open`, 05.11.2026): past the daily
+  Workers limit they go straight to the tunnel as before, not to error 1027.
 - **Nothing piles up.** dtek-service now drops DTEK's news it could not deliver within 15
   minutes (`EVENT_TTL`) instead of 6 hours: after an outage its next cycle reports the difference
   as it is then.
