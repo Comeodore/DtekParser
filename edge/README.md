@@ -205,7 +205,7 @@ in their snapshot; that brought a call down to 5-9 ms.
 
 In the dashboard, D1 > `dtek-edge` > Console, or with
 `npx wrangler d1 execute dtek-edge --remote --command "<SQL>"`. Everything from before the rename
-was copied over; the D1 `dtek-watch-test` holds the same up to 04.11.2026 11:31 Kyiv time.
+was copied over (the old D1 `dtek-watch-test` was deleted on 05.11.2026).
 
 Last runs (`mode`: `home` while the home service is in charge, `reserve` while the worker is;
 `home_age`: seconds since the last push):
@@ -272,12 +272,11 @@ the outbox), the cron and the secrets stayed; only the `workers.dev` address cha
 namespace keeps its old name, `dtek-watch-test_Watcher`. The D1 database cannot be renamed, so
 `dtek-edge` is a copy that the binding now points to.
 
-The home service's `EDGE_URL` still points to the old address, so a Worker named
-`dtek-watch-test` stays there and only forwards every request to `dtek-edge` through a service
-binding. The lab was off at the time, so `.env` could not be changed. Without it, the home
-service could not claim the sources back, and both would message the chats. Once `EDGE_URL` is
-`https://dtek-edge.maksymchuk-vladimir.workers.dev` and dtek-service is restarted, delete the
-forwarder (Worker `dtek-watch-test`) and the old D1 database `dtek-watch-test`.
+Until the home service's `EDGE_URL` could be changed (the lab was off), a Worker named
+`dtek-watch-test` stayed at the old address and forwarded every request to `dtek-edge`. On
+05.11.2026 the forwarder and the old D1 database were deleted, and `EDGE_URL` became
+`https://dtek-edge.maksymchuk-vladimir.workers.dev`. A home service that cannot reach this
+worker cannot claim the sources back, so both would message the chats: keep `EDGE_URL` right.
 
 To update dtek-brain after a change in the app modules it uses: `python edge/bundle.py out.json`,
 then upload every file in it as a `text/x-python` module with `main_module` `worker.py` and the
