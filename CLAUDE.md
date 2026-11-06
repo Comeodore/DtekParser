@@ -20,8 +20,11 @@
 - Never copy code to the server by hand (scp, rsync, `cat >`, `sed -i`,
   `docker cp`) and never run `docker compose build` / `up --build` there
   yourself. `~/.claude/hooks/dtek_deploy_guard.py` blocks that.
-- `wrangler deploy` for `edge/` runs only from `main`, clean and equal to
-  `origin/main`; the same hook checks it.
+- `dtek-edge` (`edge/worker.js` + `app/static/index.html`) and `dtek-brain`
+  (`python edge/bundle.py`, see `edge/README.md`) are uploaded only from
+  `main`, clean and equal to `origin/main`. The hook checks `wrangler deploy`;
+  an upload through the Cloudflare API is on you. Afterwards the deployed
+  modules must match the files at `main` byte for byte.
 - Roll back with `git revert`, push, `tools/deploy.sh`.
 - `/opt/dtek-service/.env` is config, not code: editing it and restarting
   without `--build` is fine.
