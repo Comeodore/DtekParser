@@ -31,7 +31,7 @@ head=$(git rev-parse HEAD)
     die "HEAD $(git rev-parse --short HEAD) is not origin/main $(git rev-parse --short origin/main). Push (or pull) first."
 
 echo "deploy: $(git log -1 --format='%h %s') -> $HOST"
-git archive --format=tar --add-virtual-file="REVISION:$(git log -1 --format='%H %s')"$'\n' HEAD "${PATHS[@]}" |
+git -c tar.umask=022 archive --format=tar --add-virtual-file="REVISION:$(git log -1 --format='%H %s')"$'\n' HEAD "${PATHS[@]}" |
     ssh "$HOST" 'rm -rf /tmp/dtek-deploy && mkdir -p /tmp/dtek-deploy && tar -x -C /tmp/dtek-deploy'
 
 # shellcheck disable=SC2029  # $dry and the services are checked above
