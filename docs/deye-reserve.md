@@ -311,10 +311,9 @@ the satellite. Scripts were kept out of the repo.
 ## Operations
 
 - **Server**: `root@192.168.0.185 -p 2222`, `/opt/dtek-service`, not
-  git. Deploy = rsync the changed files plus
-  `docker compose up -d --build reserve`, after a copy to
-  `rollback/code-<date>`. Use short or detached SSH commands: sessions
-  drop when the laptop sleeps.
+  git. Deploy only the pushed `main`, with `tools/deploy.sh reserve` (see
+  the README); `REVISION` there names the running commit. Use short or
+  detached SSH commands: sessions drop when the laptop sleeps.
 - **Secrets** are in `/opt/dtek-service/.env`: DEYE_* (shared with
   dtek-service), BOT_SCHEDULEBOT_TOKEN. Never print
   them. Settings are DEYE_RESERVE_* (see `.env.example`).

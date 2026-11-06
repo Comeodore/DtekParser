@@ -168,6 +168,24 @@ successful fetch for 5 minutes, or if Home Assistant is disconnected.
 To stage next to production, set `DB_SCHEMA=dtek_staging` (separate tables
 and lock), `NOTIFY_DRY_RUN=true`, and other `*_PORT` values.
 
+## Deploy
+
+Only the pushed `main` is deployed, and only with `tools/deploy.sh`:
+
+```bash
+tools/deploy.sh --dry-run   # what would change on the server
+tools/deploy.sh             # ship it, rebuild, show /health
+```
+
+It refuses unless the checkout is on `main`, has no uncommitted changes and
+equals `origin/main`. It ships `git archive HEAD`, not the working tree, and
+writes the commit to `/opt/dtek-service/REVISION`. Roll back with
+`git revert`, push, deploy.
+
+There is no branch but `main`. `.githooks/` refuses to create one, to commit
+anywhere else and to push anything else; enable it once per clone with
+`git config core.hooksPath .githooks`.
+
 ## Tests
 
 ```bash

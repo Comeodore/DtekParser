@@ -1,0 +1,19 @@
+#!/bin/sh
+# DtekParser has one branch, main: refuse to create any other local branch
+# (git branch, checkout -b, switch -c, worktree add -b, branch -m).
+[ "$1" = prepared ] || exit 0
+status=0
+while read -r old new ref; do
+    case "$ref" in
+        refs/heads/main) ;;
+        refs/heads/*)
+            # A deletion is fine; a branch that does not exist yet is being created.
+            case "$new" in *[!0]*) ;; *) continue ;; esac
+            if ! git rev-parse -q --verify "$ref" >/dev/null; then
+                echo "DtekParser: no branches besides main (refused to create '${ref#refs/heads/}'). Commit to main and push it." >&2
+                status=1
+            fi
+            ;;
+    esac
+done
+exit $status

@@ -1,0 +1,11 @@
+#!/bin/sh
+# DtekParser: commit on main only.
+branch=$(git symbolic-ref --short -q HEAD)
+[ "$branch" = main ] && exit 0
+# A rebase of main replays its commits on a detached HEAD.
+gitdir=$(git rev-parse --git-dir)
+for d in rebase-merge rebase-apply; do
+    [ "$(cat "$gitdir/$d/head-name" 2>/dev/null)" = refs/heads/main ] && exit 0
+done
+echo "DtekParser: commit on main only (HEAD is ${branch:-detached}). Switch to main, commit there and push." >&2
+exit 1
