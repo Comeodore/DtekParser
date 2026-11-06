@@ -142,7 +142,10 @@ tunnel. The service picks the saved cookies up on its next attempt.
 - Messages go through `notification_outbox`. Delivery retries with backoff,
   keeps per-chat order, honours Telegram rate limits, and drops a message
   after 6 h rather than sending it stale.
-- A Postgres advisory lock allows only one instance per schema.
+- A Postgres advisory lock allows only one instance per schema. Its sessions
+  ask Postgres to probe the client after a minute idle, so the lock of an
+  instance that vanished with the network frees in about 90 s, not after the
+  OS default of 2 h. A starting instance waits up to 2 minutes for the lock.
 - The power monitor uses HA `subscribe_entities`. After a reconnect it gets
   the current state with its `last_changed`, so an outage that began during
   the gap is still reported, with its real start time.

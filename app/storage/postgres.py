@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import AsyncIterator, Optional, Sequence
@@ -13,8 +14,24 @@ import asyncpg
 from app.notify.router import OutgoingMessage
 from app.power.state import PowerState, PowerStatus
 from app.storage.store import OutboxItem, SourceState
+from app.timeutil import KYIV_TZ
 
 logger = logging.getLogger(__name__)
+
+# Postgres learns that a client is gone only from the client's FIN or RST, or else from TCP
+# keepalive, which by default first probes after two hours idle. A client that vanished with the
+# network (its address dropped, so not even a reset got out) kept its session, and with it the
+# instance lock, for those two hours. Asked to probe after a minute idle, the server ends such a
+# session about 90 s after it last heard from the client, or at once when a probe meets a reset.
+# A live client answers the probes from its kernel. The service gives the lock up sooner on its
+# own when it cannot reach the server: it checks the lock every 30 s with a 10 s timeout.
+SESSION_SETTINGS = {
+    "tcp_keepalives_idle": "60",
+    "tcp_keepalives_interval": "10",
+    "tcp_keepalives_count": "3",
+    # The same bound while a reply is still unacknowledged, when keepalives do not run (ms).
+    "tcp_user_timeout": "90000",
+}
 
 # dtek_schedule and power_events predate this service and are kept as they were.
 SCHEMA_SQL = """
@@ -151,6 +168,11 @@ def _json(value) -> Optional[dict]:
 
 
 class PostgresStore:
+    # A starting instance waits this long for the lock before it gives up and is restarted, so it
+    # takes over within seconds once the server has ended the previous instance's session.
+    LOCK_WAIT_S = 120.0
+    LOCK_POLL_S = 5.0
+
     def __init__(self, url: str, schema: str = "public"):
         self._url = url
         self._schema = schema
@@ -158,7 +180,7 @@ class PostgresStore:
         self._lock_conn: Optional[asyncpg.Connection] = None
 
     async def connect(self) -> None:
-        settings = {"application_name": "DtekService", "search_path": self._schema}
+        settings = {"application_name": "DtekService", "search_path": self._schema, **SESSION_SETTINGS}
         bootstrap = await asyncpg.connect(self._url, timeout=15)
         try:
             if self._schema != "public":
@@ -168,9 +190,12 @@ class PostgresStore:
 
         # One instance per schema: a second one would send every message twice.
         self._lock_conn = await asyncpg.connect(self._url, timeout=15, server_settings=settings)
-        if not await self._lock_conn.fetchval("SELECT pg_try_advisory_lock($1)", _lock_key(self._schema)):
+        try:
+            await self._take_lock()
+        except BaseException:
             await self._lock_conn.close()
-            raise RuntimeError(f"another DTEK service instance already holds the lock for schema {self._schema!r}")
+            self._lock_conn = None
+            raise
 
         self._pool = await asyncpg.create_pool(
             self._url, min_size=1, max_size=5, command_timeout=15,
@@ -179,6 +204,46 @@ class PostgresStore:
         async with self._pool.acquire() as conn:
             await conn.execute(SCHEMA_SQL)
         logger.info(f"Database ready (schema {self._schema})")
+
+    async def _take_lock(self) -> None:
+        key = _lock_key(self._schema)
+        deadline = time.monotonic() + self.LOCK_WAIT_S
+        waiting = False
+        while not await self._lock_conn.fetchval("SELECT pg_try_advisory_lock($1)", key):
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"another DTEK service instance already holds the lock for schema {self._schema!r}")
+            if not waiting:
+                waiting = True
+                logger.warning(f"The instance lock for schema {self._schema!r} is held by {await self._lock_holder(key)}; "
+                               f"waiting up to {self.LOCK_WAIT_S:.0f}s for it")
+            await asyncio.sleep(self.LOCK_POLL_S)
+        if waiting:
+            logger.info("Took the instance lock")
+
+    async def _lock_holder(self, key: int) -> str:
+        """Who holds the lock, for the log: an old session of a vanished instance shows a long idle time."""
+        try:
+            row = await self._lock_conn.fetchrow(
+                """
+                SELECT a.pid, a.application_name, a.client_addr, a.client_port, a.backend_start, a.state_change
+                  FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+                 WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1
+                   AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                   AND l.classid = $1 AND l.objid = $2
+                """,
+                (key >> 32) & 0xFFFFFFFF, key & 0xFFFFFFFF,
+            )
+        except Exception as e:
+            return f"a session not found ({type(e).__name__}: {e})"
+        if row is None:
+            return "a session that has just ended"
+
+        def at(moment: Optional[datetime]) -> str:
+            return moment.astimezone(KYIV_TZ).strftime("%d.%m %H:%M:%S") if moment else "?"
+
+        return (f"pid {row['pid']} ({row['application_name'] or 'no name'} from "
+                f"{row['client_addr']}:{row['client_port']}, connected {at(row['backend_start'])}, "
+                f"last active {at(row['state_change'])})")
 
     async def lock_alive(self) -> bool:
         """False once the connection holding the instance lock is gone."""
