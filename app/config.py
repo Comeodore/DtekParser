@@ -91,7 +91,7 @@ class Settings:
     deye: Optional[DeyeConfig] = None
     reserve_url: Optional[str] = None   # deye-reserve, told when the inverter's schedule or grid changes
     owner_id: Optional[int] = None      # the Telegram user who alone sees deye-reserve's table in the mini app
-    # The reserve on Cloudflare (cf-watch/), which messages the chats while this service is away; off when unset.
+    # The reserve on Cloudflare (edge/), which messages the chats while this service is away; off when unset.
     edge_url: Optional[str] = None
     edge_key: Optional[str] = None
 

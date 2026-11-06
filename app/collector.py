@@ -102,6 +102,13 @@ class SourceCollector:
 
     async def cycle(self) -> bool:
         now = self._clock()
+        ok = await self._cycle(now)
+        if not ok and self._edge is not None:
+            # No news of DTEK to push, but the power is still watched here: the reserve must not take that over.
+            await self._edge.alive(self.config, now)
+        return ok
+
+    async def _cycle(self, now: datetime) -> bool:
         try:
             raw = await self._site.fetch()
         except FetchError as e:

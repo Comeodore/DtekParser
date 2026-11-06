@@ -14,16 +14,19 @@ from app.config import Settings
 from app.dtek.client import BrowserPool, DtekSite
 from app.edge import Edge
 from app.heartbeat import Heartbeat
-from app.inverter.deye import InverterMonitor
+from app.inverter.deye import GRID_SLOT, InverterMonitor
 from app.notify.outbox import Gateway, OutboxSender, TelegramGateway
 from app.notify.router import Router
-from app.power.state import PowerStatus
+from app.power.state import PowerState, PowerStatus
 from app.power.monitor import PowerMonitor
 from app.reserve_hook import ReserveHook
 from app.storage.postgres import PostgresStore
 from app.timeutil import KYIV_TZ, now_kyiv
 
 logger = logging.getLogger(__name__)
+
+# power_events row of the power monitor's state (Home Assistant); the Deye inverter's is GRID_SLOT.
+POWER_SLOT = 1
 
 
 async def supervise(name: str, factory: Callable[[], Awaitable[None]]) -> None:
@@ -57,7 +60,7 @@ class Service:
         # deye-reserve plans the krem inverter's TOU table; it is told when that source's schedule or grid changes.
         self.reserve = ReserveHook(settings.reserve_url)
         reserve_source = settings.deye.source if settings.deye is not None else None
-        # The reserve on Cloudflare: messages the chats with DTEK's news while this service is away.
+        # The reserve on Cloudflare: messages the chats in this service's place while it is away.
         self.edge = Edge(settings.edge_url, settings.edge_key, settings.bots) if settings.edge_url else None
 
         self.sites: dict[str, DtekSite] = {}
@@ -90,10 +93,35 @@ class Service:
                 on_grid=lambda t: self.reserve.fire("grid", "back" if t.status is PowerStatus.ON else "lost"),
                 grid_day_path=os.path.join(settings.state_dir, f"grid-day-{settings.deye.source}.json"),
             )
+            if self.edge is not None:
+                inverter, shown_with = self.inverter, settings.deye.batteries_source
+                self.edge.deye = lambda source: inverter.reserve_access() if source == shown_with else None
+        if self.edge is not None:
+            self.edge.power = self.power_state
         self._tasks: list[asyncio.Task] = []
+
+    def power_slots(self) -> list[tuple[str, int]]:
+        """The sources whose power gone or back this service messages, with their power_events slot."""
+        slots = []
+        if self.power is not None:
+            slots.append((self.power.source, POWER_SLOT))
+        if self.inverter is not None and self.inverter.config.notify_grid:
+            slots.append((self.inverter.source, GRID_SLOT))
+        return slots
+
+    def power_state(self, source: str) -> Optional[PowerState]:
+        """The power at a source's address as this service holds it, for the reserve to go on from."""
+        if self.power is not None and self.power.source == source:
+            return self.power.state
+        if self.inverter is not None and self.inverter.config.notify_grid and self.inverter.source == source:
+            return self.inverter.grid
+        return None
 
     async def start(self) -> None:
         await self.store.connect()
+        if self.edge is not None:
+            # The reserve may have watched the power meanwhile: go on from what it saw, before watching it again.
+            await self.edge.take_back_power(self.store, self.power_slots())
         for collector in self.collectors.values():
             await collector.restore()
         if self.power is not None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from html import escape
-from typing import Optional
+from typing import Iterable, Optional
 
 from app.dtek.models import DaySchedule, Line, Outage, OutageKind, Snapshot
 from app.engine.events import OutageChange, OutageEvent, ScheduleChange, ScheduleEvent
@@ -18,6 +18,8 @@ TEXT = {
         "tomorrow_published": "Tomorrow's schedule published",
         "tomorrow_changed": "Tomorrow's schedule updated",
         "tomorrow_cleared": "Tomorrow's outages cancelled",
+        "today_schedule": "Today's schedule",
+        "tomorrow_schedule": "Tomorrow's schedule",
         "no_more_today": "✅ No more outages today",
         "no_outages": "✅ No outages planned",
         "line": "Line",
@@ -52,6 +54,8 @@ TEXT = {
         "tomorrow_published": "Графік на завтра опубліковано",
         "tomorrow_changed": "Графік на завтра оновлено",
         "tomorrow_cleared": "Відключення на завтра скасовано",
+        "today_schedule": "Графік на сьогодні",
+        "tomorrow_schedule": "Графік на завтра",
         "no_more_today": "✅ Більше відключень сьогодні не заплановано",
         "no_outages": "✅ Відключень не заплановано",
         "line": "Лінія",
@@ -142,6 +146,20 @@ def render_schedule(event: ScheduleEvent, snapshot: Snapshot, now: datetime, lan
     key = f"{when}_{'published' if event.change is ScheduleChange.PUBLISHED else 'changed'}"
     body = _day_body(lang, event.schedule, from_minute, next_day, empty_key)
     return f"📅 <b>{_t(lang, key)}</b> ({label})\n\n{body}"
+
+
+def render_days(days: Iterable[DaySchedule], snapshot: Snapshot, now: datetime, lang: str) -> str:
+    """These days' schedules as they are now, with no change to report: what the reserve on Cloudflare sends
+    while the mini app, which otherwise shows them, is down with this service."""
+    today = _today(now)
+    blocks = []
+    for day in days:
+        is_today = day.date == today
+        title = _t(lang, "today_schedule" if is_today else "tomorrow_schedule")
+        body = _day_body(lang, day, minute_of_day(now) if is_today else 0, snapshot.day(day.date + timedelta(days=1)),
+                         "no_more_today" if is_today else "no_outages")
+        blocks.append(f"📅 <b>{title}</b> ({day.date.strftime('%d.%m')})\n\n{body}")
+    return "\n\n".join(blocks)
 
 
 def next_outage_text(snapshot: Optional[Snapshot], now: datetime, lang: str) -> Optional[str]:

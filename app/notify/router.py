@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # Undelivered messages older than this are dropped rather than sent stale.
 MESSAGE_TTL = timedelta(hours=6)
 # DTEK's own news is not kept that long: once the service is back, its next cycle reports the difference as it
-# is then, and the reserve on Cloudflare (cf-watch/) has covered the time in between.
+# is then, and the reserve on Cloudflare (edge/) has covered the time in between.
 EVENT_TTL = timedelta(minutes=15)
 # Outage notices worth a message; schedule-driven ones are covered by schedule messages.
 NOTIFIABLE_KINDS = (OutageKind.EMERGENCY, OutageKind.PLANNED)
@@ -83,6 +83,7 @@ class Router:
 
     def for_grid(self, source_name: str, transition: PowerTransition, snapshot: Optional[Snapshot],
                  now: datetime) -> list[OutgoingMessage]:
-        """Power lost or back at a source's address, however it was noticed (HA voltage, Deye grid)."""
+        """Power lost or back at a source's address, however it was noticed (HA voltage, Deye grid). The reserve on
+        Cloudflare (edge/) sends these only while this service is away (app/edge.py)."""
         source = self._settings.source(source_name)
         return self._fan_out(source, render_power(transition, snapshot, now, source.lang), now)
