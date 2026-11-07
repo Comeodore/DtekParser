@@ -59,9 +59,15 @@ the whole import, house and charger, under 4.5 kW.
 - **Sun**: Open-Meteo **irradiance on the panels' plane**
   (`global_tilted_irradiance`, tilt 30, azimuth 0 = south) from seven models
   (ECMWF, UKMO, GEM, ICON, GFS, Météo-France, CMA) plus the 51-run ECMWF
-  ensemble. PV W = 4.4 × GTI (what 5.35 × horizontal was in September–
-  October; the plane follows the low winter sun: on clear December days the
-  roof gets ~1.8× the horizontal). Since 24.10 **P50 = median of
+  ensemble. PV W = 4.0 × GTI since 07.11 (`DEYE_RESERVE_PV_PER_GTI`; 4.4
+  before, what 5.35 × horizontal was in September–October). On 22.10–07.11
+  the panels' clean hours (battery under 95%) gave 0.91 of the median at
+  4.4: at 4.0 its hourly error fell from 199 to 187 W, the daily one from
+  0.84 to 0.78 kWh, with no bias left (×0.99). A factor relearned daily from
+  the last 7 or 14 days' clean hours did no better (193 and 187 W, 0.86
+  and 0.80 kWh) and has nothing to learn from while the battery is held
+  full. The plane follows the low winter sun: on clear December days the
+  roof gets ~1.8× the horizontal. Since 24.10 **P50 = median of
   Météo-France, ICON and UKMO** (`DEYE_RESERVE_SUN_MODELS`; a model with
   gaps on a day is left out), pessimistic = min(ECMWF ensemble P10, that
   median). Day-ahead against the panels on 08–24.10, hours with room in

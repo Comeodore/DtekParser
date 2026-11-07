@@ -48,7 +48,7 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   read from dtek-service on 127.0.0.1:9998), the sun (Open-Meteo irradiance
   on the panels' plane, 30° south: P50 = the median of Météo-France, ICON
   and UKMO, which matched the panels best, pessimistic = min of the
-  ECMWF-ensemble P10 and that median; PV W = 4.4 × GTI) and the house's
+  ECMWF-ensemble P10 and that median; PV W = 4.0 × GTI) and the house's
   load (a week, from one Deye history call a day). All models are still
   ranked against the panels daily, only to watch, leaving out hours with
   the battery near full, when zero export holds the panels down. Today and

@@ -445,7 +445,7 @@ def test_config_defaults_and_checks():
     cfg = load_config({k: v for k, v in ENV.items() if k not in ("DEYE_RESERVE_PV_PER_GTI", "DEYE_RESERVE_TABLE_MESSAGES")})
     assert (cfg.write, cfg.port, cfg.host, cfg.group, cfg.chat_id) == (False, 9997, "127.0.0.1", "GPV2.2", "370921204")
     assert cfg.table_messages is False and load_config(ENV).table_messages is True
-    assert (cfg.pv_per_gti, cfg.tilt, cfg.azimuth) == (4.4, 30.0, 0.0)
+    assert (cfg.pv_per_gti, cfg.tilt, cfg.azimuth) == (4.0, 30.0, 0.0)
     assert (cfg.watch_s, cfg.alert_margin_min, cfg.alert_unscheduled_h) == (180.0, 30.0, 2.0)
     assert cfg.params == Params() and cfg.debounce_s == 150 and cfg.max_writes_per_day == 6
     assert [t.isoformat() for t in cfg.forecast_at] == ["05:30:00", "22:00:00"]

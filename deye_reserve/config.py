@@ -165,8 +165,9 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
         group=_get(env, "DEYE_RESERVE_GROUP", "GPV2.2"),
         latitude=_num(env, "DEYE_RESERVE_LATITUDE", 50.3084),
         longitude=_num(env, "DEYE_RESERVE_LONGITUDE", 30.4067),
-        # 4.4 W per W/m2 on the 30-degree south roof is what 5.35 x horizontal was in September-October.
-        pv_per_gti=_num(env, "DEYE_RESERVE_PV_PER_GTI", 4.4),
+        # W per W/m2 on the 30-degree south roof: 4.4 (5.35 x horizontal) in September-October, 4.0 since 07.11:
+        # on 22.10-07.11 the panels' clean hours gave 0.91 of the day-ahead median at 4.4.
+        pv_per_gti=_num(env, "DEYE_RESERVE_PV_PER_GTI", 4.0),
         tilt=_num(env, "DEYE_RESERVE_TILT", 30.0),
         azimuth=_num(env, "DEYE_RESERVE_AZIMUTH", 0.0),
         # Of the seven Open-Meteo models these three fit the panels best on 08-24.10, their median better still.
