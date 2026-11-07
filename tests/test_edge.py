@@ -380,6 +380,10 @@ def test_reserve_page_splits_the_grid_and_shows_the_forecast_the_home_service_pu
     deye["items"] = [deye_item("K", kyiv(2026, 10, 17, 1, 9), DailyEnergyPurchased="0.4")]
     inverter = reserve_page(site, later, deye=deye, inverter=pushed, grid_day=own)["inverter"]
     assert (inverter["grid_night_kwh"], inverter["grid_day_kwh"], inverter["pv_forecast_kwh"]) == (0.4, 0.0, 3.2)
+    # A reading still of the day before is set against that day's forecast, not today's.
+    deye["items"] = [deye_item("K", kyiv(2026, 10, 16, 14, 58))]
+    inverter = reserve_page(site, later, deye=deye, inverter=pushed, grid_day=own)["inverter"]
+    assert (inverter["stale"], inverter["pv_forecast_kwh"]) == (True, 6.4)
     # A day the forecast does not reach, and no push at all: the page shows the total alone, no forecast.
     deye["items"] = [deye_item("K", kyiv(2026, 10, 19, 12, 0))]
     inverter = reserve_page(site, kyiv(2026, 10, 19, 12, 1), deye=deye)["inverter"]

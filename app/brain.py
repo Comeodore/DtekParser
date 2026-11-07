@@ -167,7 +167,9 @@ def inverter_now(deye: Optional[dict], now: datetime, home: Optional[dict] = Non
     body = reading.to_dict(now, STALE_S)
     home = home or {}
     night, day = grid_split(reading, home.get("grid_day"), grid_day)
-    forecast = (home.get("sun") or {}).get(now.date().isoformat())
+    # The forecast of the reading's day, as its panels' output beside it: a reading still of yesterday (none read
+    # since the home service went away, Deye failing) is not set against today's sun.
+    forecast = (home.get("sun") or {}).get(reading.at.astimezone(KYIV_TZ).date().isoformat())
     body.update(grid_night_kwh=night, grid_day_kwh=day, pv_forecast_kwh=forecast, battery_until=None)
     return body
 
