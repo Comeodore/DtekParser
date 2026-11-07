@@ -45,10 +45,15 @@ def warm_up() -> None:
         item = {"deviceSn": "1", "collectionTime": request["now"] // 1000, "dataList": [
             {"key": key, "value": value} for key, value in (
                 ("SOC", "50"), ("BatteryPower", "-300"), ("GridVoltageL1L2", "0"), ("TotalConsumptionPower", "400"),
-                ("TotalDCInputPower", "0"), ("TotalGridPower", "0"), ("DCPowerPV1", "0"), ("DCVoltagePV1", "0"))]}
+                ("TotalDCInputPower", "0"), ("TotalGridPower", "0"), ("DCPowerPV1", "0"), ("DCVoltagePV1", "0"),
+                ("DailyEnergyPurchased", "1.5"))]}
         deye = {"items": [item], "batteries": [["elevator", "1"]], "main": "1", "min_grid_voltage": 100}
         json.dumps(brain.page(dict(request, lang=lang, read_at=request["now"], victron=victron, deye=deye)))
-        json.dumps(brain.page(dict(request, lang=lang, read_at=request["now"], deye=deye)))
+        # krem's diagram, with the grid by tariff and the sun forecast the home service pushed.
+        inverter = {"grid_day": {"day": "2026-10-01", "marks": {"7": 1.0}, "night_start_h": 23, "night_end_h": 7},
+                    "sun": {"2026-10-01": 5.0}}
+        json.dumps(brain.page(dict(request, lang=lang, read_at=request["now"], deye=deye, inverter=inverter,
+                                   grid_day={"day": "2026-10-01", "marks": {"7": 1.0}})))
         state = {"on": True, "since": request["now"] - 7200_000}
         for on in (False, True):
             observed = {"on": on, "at": request["now"], "battery": "80%"}

@@ -16,7 +16,8 @@ inverter, going on from the state this service last pushed.
 
 The mini app itself is stood in for as well: `page` gives its data from the reserve's last read, with kem's
 Victron as VRM has it for the power really there and the home battery, the building's Deye inverters in kem's
-batteries row and krem's inverter diagram, from Deye Cloud.
+batteries row and krem's inverter diagram, from Deye Cloud, with today's grid by tariff and the sun forecast
+that this service pushed (and the tariff hours the worker noted itself meanwhile).
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from app.dtek.models import DaySchedule, Snapshot
 from app.dtek.protocol import build_snapshot, parse_fact, parse_house
 from app.engine.detector import Baseline, detect
 from app.engine.events import Event, ScheduleEvent
+from app.inverter.grid_day import GridDay
 from app.inverter.reading import STALE_S, DeyeError, InverterReading, parse_device_latest
 from app.notify.messages import render_days, render_power
 from app.notify.router import event_texts
@@ -45,6 +47,8 @@ VICTRON_FRESH = timedelta(minutes=10)
 BATTERY_FRESH = timedelta(minutes=5)
 # As DEYE_MIN_GRID_VOLTAGE at home.
 MIN_GRID_V = 100.0
+# The tariff's hours when no push has given them: DEYE_RESERVE_NIGHT_START / _END's defaults at home.
+NIGHT_START_H, NIGHT_END_H = 23, 7
 
 
 def describe(event: Event) -> str:
@@ -138,28 +142,48 @@ def power_now(victron: Optional[dict], deye: Optional[dict], now: datetime) -> t
     return actual, rows
 
 
-def inverter_now(deye: Optional[dict], now: datetime) -> Optional[dict]:
-    """The inverter diagram's data (krem), as InverterMonitor.payload at home, from `deye`'s `main` serial. What
-    needs the home service is left out: today's grid by tariff (the page shows the total), the sun forecast
-    (deye-reserve) and until when the battery lasts."""
+def grid_split(reading: InverterReading, pushed: Optional[dict], own: Optional[dict]) -> tuple:
+    """Today's grid by tariff, (night, day) kWh, as the home service splits it (GridDay): from the counter at the
+    tariff hours the home service last pushed (`pushed`, GridDay.payload) and the ones the worker noted itself
+    while it was away (`own`: day, marks), the home service's first where both have one. (None, None) while a
+    tariff hour of the day is not known: the page then shows the total."""
+    hours = pushed or {}
+    grid = GridDay(int(hours.get("night_start_h", NIGHT_START_H)), int(hours.get("night_end_h", NIGHT_END_H)))
+    for marks in (own, pushed):
+        if marks:
+            grid.add(marks.get("day"), marks.get("marks"))
+    return grid.split(reading) or (None, None)
+
+
+def inverter_now(deye: Optional[dict], now: datetime, home: Optional[dict] = None,
+                 grid_day: Optional[dict] = None) -> Optional[dict]:
+    """The inverter diagram's data (krem), as InverterMonitor.payload at home, from `deye`'s `main` serial. `home`:
+    what the home service last pushed for it (`grid_day`, `sun`: deye-reserve's forecast by day); `grid_day`: the
+    tariff hours' counter the worker noted itself. Today's grid is split by tariff and the day's forecast shown
+    as at home while those are known; until when the battery lasts needs deye-reserve itself and is left out."""
     reading = deye_readings(deye).get((deye or {}).get("main"))
     if reading is None:
         return None
     body = reading.to_dict(now, STALE_S)
-    body.update(grid_night_kwh=None, grid_day_kwh=None, pv_forecast_kwh=None, battery_until=None)
+    home = home or {}
+    night, day = grid_split(reading, home.get("grid_day"), grid_day)
+    forecast = (home.get("sun") or {}).get(now.date().isoformat())
+    body.update(grid_night_kwh=night, grid_day_kwh=day, pv_forecast_kwh=forecast, battery_until=None)
     return body
 
 
 def page(request: dict) -> dict:
     """The mini app's data while the home service's own is down. request: source, now (ms), building, answer,
     fact, names and read_at (ms) of the reserve's last good read, lang, `victron` (kem) and `deye`, whose `main`
-    is the inverter of the diagram (krem) and `batteries` the batteries row's (kem); see power_now."""
+    is the inverter of the diagram (krem) and `batteries` the batteries row's (kem); see power_now. For the
+    diagram also `inverter`, what the home service last pushed for it, and `grid_day`, the worker's own marks;
+    see inverter_now."""
     now = _at(request["now"])
     read_at = _at(request["read_at"])
     actual, batteries = power_now(request.get("victron"), request.get("deye"), now)
+    inverter = inverter_now(request.get("deye"), now, request.get("inverter"), request.get("grid_day"))
     payload = page_payload(_snapshot(request, read_at), now, request["source"], request["lang"],
-                           now - read_at < PAGE_STALE, read_at, inverter_now(request.get("deye"), now), batteries,
-                           actual)
+                           now - read_at < PAGE_STALE, read_at, inverter, batteries, actual)
     payload["reserve"] = True
     return payload
 

@@ -92,8 +92,14 @@ the home service has gone quiet.
   with `reserve: true`, which the page shows as a note with the time of that read. For kem it also has
   the power really there and the batteries row: the Victron as the cron last read it from VRM
   (`kv.victron`) and the building's Deye inverters (Elevator, Water); krem's page has the inverter
-  diagram of Круглик (2511090098), without what needs the home service: today's grid by tariff (it
-  shows the total), the sun forecast and until when the battery lasts. The Deye readings are the cron's
+  diagram of Круглик (2511090098), and since 07.11.2026 today's grid by tariff (night / day) and the
+  day's sun forecast as at home: krem's pushes carry them (`inverter`: the inverter's daily grid
+  counter at 07:00 and 23:00 as the home service noted it, GridDay, and deye-reserve's P50 for each of
+  the three days its forecast covers, so a lab off past midnight still has the next day's), and while
+  the home service is away the cron notes the counter at those hours itself from its Deye reads
+  (`kv.grid_day`, worker.js followGridDay, the same rule as at home: the last reading before the hour,
+  the one after at most 10 minutes later). A tariff hour neither side saw leaves the total alone, as at
+  home. Only until when the battery lasts still needs the home service (deye-reserve). The Deye readings are the cron's
   (`kv.deye`), with the token the home service pushes with kem's baseline while that is good, else one
   of its own from the secrets `DEYE_APP_ID`, `DEYE_APP_SECRET`, `DEYE_EMAIL`, `DEYE_PASSWORD_SHA256`
   (the home service's `DEYE_*`), kept in `kv` until a day before it expires. dtek-brain parses the

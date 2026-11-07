@@ -7,6 +7,10 @@ restart keeps it: the night is the 07:00 value plus what came after 23:00,
 the day the rest. A boundary not seen (the service down across it, or
 readings too far apart) leaves the day unsplit, and the mini app shows the
 total alone rather than a guess.
+
+The marks also go to the reserve on Cloudflare with each push (payload), and
+its stand-in page splits the day with them and with the ones it notes itself
+while this service is away (worker.js followGridDay; merged with add).
 """
 from __future__ import annotations
 
@@ -60,6 +64,27 @@ class GridDay:
                 self._marks[hour] = before.grid_today_kwh
                 logger.info(f"Grid today at {hour:02d}:00: {before.grid_today_kwh} kWh")
                 self._save()
+
+    def payload(self) -> dict:
+        """The marks as the reserve keeps them: their day (None before the first), the counter at each tariff hour
+        seen (hour as text → kWh) and the tariff's hours."""
+        return {"day": self._day.isoformat() if self._day else None,
+                "marks": {str(h): v for h, v in self._marks.items()},
+                "night_start_h": self.night_start_h, "night_end_h": self.night_end_h}
+
+    def add(self, day: Optional[str], marks: Optional[dict]) -> None:
+        """Marks noted elsewhere (a payload's day and marks): a later day's replace these, the same day's are
+        taken over these, an earlier day's are left out."""
+        try:
+            when = date.fromisoformat(day) if day else None
+            noted = {int(h): float(v) for h, v in (marks or {}).items()}
+        except (TypeError, ValueError, AttributeError):
+            return
+        if when is None or (self._day is not None and when < self._day):
+            return
+        if when != self._day:
+            self._day, self._marks = when, {}
+        self._marks.update(noted)
 
     def split(self, reading: InverterReading) -> Optional[tuple[float, float]]:
         """(night, day) kWh from the grid on the reading's day so far; None when that is not known."""

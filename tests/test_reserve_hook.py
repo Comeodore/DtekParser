@@ -193,6 +193,38 @@ def test_the_krem_mini_app_gets_the_grid_by_tariff(monkeypatch, tmp_path):
     assert (tmp_path / "grid-day-krem.json").exists()
 
 
+async def test_the_reserve_gets_the_krem_inverters_day(tmp_path):
+    service = Service(load_settings({**BASE_ENV, **DEYE_ENV, "STATE_DIR": str(tmp_path),
+                                     "DEYE_RESERVE_URL": "http://127.0.0.1:9997"}),
+                      store=MemoryStore(), gateway=object())
+    service.inverter.grid_day.follow(grid_at(6, 59, 0, 2.5), grid_at(7, 0, 12, 2.6))
+    sun = {"date": "2026-10-16", "p50_kwh": 6.4, "days": {"2026-10-16": 6.4, "2026-10-17": 3.2}}
+
+    async def reserve_sun():
+        return sun
+    service.reserve.sun = reserve_sun
+    grid_day = {"day": "2026-10-16", "marks": {"7": 2.5}, "night_start_h": 23, "night_end_h": 7}
+    assert await service.inverter_day("krem") == {"grid_day": grid_day, "sun": sun["days"]}
+    assert await service.inverter_day("kem") is None
+    # deye-reserve away (or of before its `days`): the counter alone.
+    sun = None
+    assert await service.inverter_day("krem") == {"grid_day": grid_day}
+
+
+def test_the_grid_day_takes_marks_noted_elsewhere():
+    grid = InverterMonitor(load_settings({**BASE_ENV, **DEYE_ENV}).deye).grid_day
+    assert grid.payload() == {"day": None, "marks": {}, "night_start_h": 23, "night_end_h": 7}
+    grid.add("2026-10-16", {"23": 7.6})
+    grid.add("2026-10-16", {"7": 2.1, "23": 7.5})              # the same day's: taken over these
+    grid.add("2026-10-15", {"7": 9.9})                         # an earlier day's: left out
+    grid.add("2026-10-16", {"7": "not a number"})              # broken: left out whole
+    grid.add(None, {"7": 1.0})
+    assert grid.payload()["marks"] == {"7": 2.1, "23": 7.5}
+    assert grid.split(grid_at(23, 40, 0, 8.0)) == (2.6, 5.4)
+    grid.add("2026-10-17", {"7": 0.3})                         # a later day's: replace them
+    assert grid.payload()["day"] == "2026-10-17" and grid.payload()["marks"] == {"7": 0.3}
+
+
 # ---- deye-reserve's table in the krem mini app, for the owner only ----
 
 def slots(*rows):

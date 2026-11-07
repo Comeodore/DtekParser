@@ -39,8 +39,10 @@
 // nothing here. A page goes on to the home service as before; only when that does not answer (the tunnel or the
 // service down) the same index.html comes from here, and the page, finding the home server down, asks GET
 // /page/<source> here for data dtek-brain builds from the object's last read (in D1): for kem with the Victron as
-// VRM has it and the building's Deye inverters, for krem the inverter diagram. A page served here also has the cron
-// and the object read for it for PAGE_WANTED_MS, in case the home service is alive and only the tunnel is down.
+// VRM has it and the building's Deye inverters, for krem the inverter diagram, with today's grid by tariff and the
+// sun forecast from the home service's last push (and the tariff hours noted here since). A page served here also
+// has the cron and the object read for it for PAGE_WANTED_MS, in case the home service is alive and only the tunnel
+// is down.
 //
 // Budget on Workers Free (see README.md): while the home service is alive, no Durable Object time or requests at
 // all; ~2,900 Worker requests and D1 writes a day for the pushes and 1,440 cron runs. While it is away: a read every
@@ -962,12 +964,72 @@ async function readDeye(env, homes, kv, writes, now) {
     }
     if (data && !data.success) throw new Error(`device/latest: ${data.code} ${data.msg}`);
     if (!data) return kv.deye || null;
+    const before = kv.deye;
     kv.deye = { at: now, items: data.deviceDataList || [] };
     writes.push(putKv(env, "deye", kv.deye, now));
+    noteGridDay(env, homes, kv, before, kv.deye, writes, now);
   } catch (e) {
     console.warn(`deye: ${e}`);
   }
   return kv.deye || null;
+}
+
+// The tariff's hours when the home service has not pushed its own (DEYE_RESERVE_NIGHT_START / _END's defaults).
+const GRID_DAY_HOURS = { night_start_h: 23, night_end_h: 7 };
+// As GridDay.MAX_GAP at home: readings further apart across a tariff hour leave the counter there unknown.
+const GRID_DAY_GAP_MS = 10 * 60 * 1000;
+const KYIV_HOUR = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Kyiv", hour: "numeric", hourCycle: "h23" });
+
+// An inverter's daily grid counter (DailyEnergyPurchased, kWh) and when Deye collected it; null without either.
+function gridCounter(item) {
+  const at = Number(item?.collectionTime) * 1000;
+  const point = (item?.dataList || []).find((p) => p.key === "DailyEnergyPurchased");
+  const kwh = parseFloat(point?.value);
+  return Number.isFinite(at) && at > 0 && Number.isFinite(kwh) ? { at, kwh } : null;
+}
+
+// GridDay.follow at home (app/inverter/grid_day.py): the counter at a tariff hour that lies between two readings of an
+// inverter in a row (device/latest items) is the earlier one's, when both are of the same Kyiv day and at most
+// GRID_DAY_GAP_MS apart. kept: {day, marks: {hour: kWh}} so far, or null; returns it with what was noted (a new
+// day's mark starts the day over), the same object when nothing was.
+export function followGridDay(kept, before, after, hours) {
+  const a = gridCounter(before);
+  const b = gridCounter(after);
+  if (!a || !b || b.at - a.at > GRID_DAY_GAP_MS) return kept;
+  const day = KYIV_DATE.format(b.at);
+  if (KYIV_DATE.format(a.at) !== day) return kept;
+  const [from, to] = [a.at, b.at].map((at) => parseInt(KYIV_HOUR.format(at), 10));
+  let next = kept;
+  for (const hour of [hours.night_end_h, hours.night_start_h]) {
+    if (from < hour && hour <= to) next = { day, marks: { ...(next?.day === day ? next.marks : {}), [hour]: a.kwh } };
+  }
+  return next;
+}
+
+// Today's grid by tariff for the pages with an inverter diagram (krem), from the readings of the cron: the counter
+// at the tariff's hours, noted here while the home service is away (its own comes with its pushes, `inverter`), kept
+// in kv as `grid_day`, per source. dtek-brain's page splits the day with both.
+function noteGridDay(env, homes, kv, before, after, writes, now) {
+  const kept = { ...(kv.grid_day || {}) };
+  let noted = false;
+  for (const [source, { inverter }] of Object.entries(SOURCES)) {
+    if (!inverter) continue;
+    const pushed = homes[source]?.body?.inverter?.grid_day || {};
+    const hours = {
+      night_start_h: pushed.night_start_h ?? GRID_DAY_HOURS.night_start_h,
+      night_end_h: pushed.night_end_h ?? GRID_DAY_HOURS.night_end_h,
+    };
+    const find = (deye) => (deye?.items || []).find((item) => item.deviceSn === inverter);
+    const was = kept[source] || null;
+    const next = followGridDay(was, find(before), find(after), hours);
+    if (next === was) continue;
+    kept[source] = next;
+    noted = true;
+    console.log(`${source}: grid today at the tariff hours ${JSON.stringify(next)}`);
+  }
+  if (!noted) return;
+  kv.grid_day = kept;
+  writes.push(putKv(env, "grid_day", kept, now));
 }
 
 // krem: its inverter's grid voltage held against DEYE_MIN_GRID_V, as at home, from a fresh reading.
@@ -1074,12 +1136,13 @@ async function judgePower(env, source, home, edge, observed, now, writes) {
 
 // The mini app's data while the home service's own is down (GET /page/<source>, which the page asks once the home
 // server does not answer): dtek-brain's page from the object's last good read, with the Victron and the Deye
-// inverters where the source has them, all from D1. A JSON string, or null before the first good read.
+// inverters where the source has them, and for the inverter diagram today's grid by tariff and the sun forecast
+// (noteGridDay), all from D1. A JSON string, or null before the first good read.
 async function pageBody(env, source, now) {
   const [edgeRow, homeRow, kvRows] = await env.DB.batch([
     env.DB.prepare("SELECT read, power FROM edge WHERE source = ?").bind(source),
     env.DB.prepare("SELECT body FROM home WHERE source = ?").bind(source),
-    env.DB.prepare("SELECT name, value FROM kv WHERE name IN ('victron', 'deye')"),
+    env.DB.prepare("SELECT name, value FROM kv WHERE name IN ('victron', 'deye', 'grid_day')"),
   ]);
   const edge = edgeRow.results[0] || {};
   const read = json(edge.read);
@@ -1113,6 +1176,10 @@ async function pageBody(env, source, now) {
       lang: push.lang || "uk",
       victron,
       deye: deye || null,
+      // The diagram's grid by tariff and sun forecast: as the home service last pushed them, and the tariff hours
+      // noted here since.
+      inverter: SOURCES[source].inverter ? push.inverter || null : null,
+      grid_day: SOURCES[source].inverter ? kv.grid_day?.[source] || null : null,
     }),
   );
 }

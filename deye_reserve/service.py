@@ -783,13 +783,19 @@ class ReserveService:
         return self.battery
 
     def sun_today(self) -> Optional[dict]:
-        """Today's PV forecast in kWh, for the krem mini app (dtek-service shows it next to the panels' output)."""
+        """Today's PV forecast in kWh, for the krem mini app (dtek-service shows it next to the panels' output),
+        and `days`, every day from today on that the forecast covers, which dtek-service pushes to the reserve on
+        Cloudflare: its stand-in page goes on showing the day's forecast while the homelab is off, past midnight
+        too."""
         today = local(self._clock()).date()
         if self.forecast is None or not self.forecast.covers([today]):
             return None
+        days = sorted({d for d, _ in self.forecast.p50 if d >= today})
         return {"date": today.isoformat(), "p50_kwh": round(self.forecast.total_kwh(today), 2),
                 "low_kwh": round(self.forecast.total_kwh(today, pessimistic=True), 2),
-                "fetched_at": self.forecast.fetched_at.isoformat()}
+                "fetched_at": self.forecast.fetched_at.isoformat(),
+                "days": {d.isoformat(): round(self.forecast.total_kwh(d), 2) for d in days
+                         if self.forecast.covers([d])}}
 
     def health(self) -> dict:
         now = self._clock()

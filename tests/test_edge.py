@@ -358,6 +358,53 @@ def test_reserve_page_draws_the_krem_inverter():
     assert reserve_page(site, now, deye=dict(deye, main="X"))["inverter"] is None
 
 
+def test_reserve_page_splits_the_grid_and_shows_the_forecast_the_home_service_pushed():
+    site = FakeSite()
+    now = kyiv(2026, 10, 16, 23, 40)
+    # The counter at 23:00 was 7.6 kWh and is 8.0 now (the fixture's DailyEnergyPurchased).
+    deye = {"items": [deye_item("K", kyiv(2026, 10, 16, 23, 38))], "main": "K", "min_grid_voltage": 100}
+    pushed = {"grid_day": {"day": "2026-10-16", "marks": {"7": 2.1}, "night_start_h": 23, "night_end_h": 7},
+              "sun": {"2026-10-16": 6.4, "2026-10-17": 3.2}}
+    own = {"day": "2026-10-16", "marks": {"23": 7.6}}
+    inverter = reserve_page(site, now, deye=deye, inverter=pushed, grid_day=own)["inverter"]
+    # As at home: the night is the 07:00 counter and what came after 23:00, the day the rest.
+    assert (inverter["grid_today_kwh"], inverter["grid_night_kwh"], inverter["grid_day_kwh"]) == (8.0, 2.5, 5.5)
+    assert inverter["pv_forecast_kwh"] == 6.4 and inverter["battery_until"] is None
+    # The home service's mark wins over one noted here; one of another day is left out.
+    both = reserve_page(site, now, deye=deye, inverter=pushed, grid_day={"day": "2026-10-16", "marks": {"7": 1.0, "23": 7.6}})
+    assert both["inverter"]["grid_night_kwh"] == 2.5
+    stale = reserve_page(site, now, deye=deye, inverter=pushed, grid_day={"day": "2026-10-15", "marks": {"23": 7.6}})
+    assert (stale["inverter"]["grid_night_kwh"], stale["inverter"]["grid_day_kwh"]) == (None, None)
+    # After midnight, with the home service still away: the next day's forecast, and all of it night until 07:00.
+    later = kyiv(2026, 10, 17, 1, 10)
+    deye["items"] = [deye_item("K", kyiv(2026, 10, 17, 1, 9), DailyEnergyPurchased="0.4")]
+    inverter = reserve_page(site, later, deye=deye, inverter=pushed, grid_day=own)["inverter"]
+    assert (inverter["grid_night_kwh"], inverter["grid_day_kwh"], inverter["pv_forecast_kwh"]) == (0.4, 0.0, 3.2)
+    # A day the forecast does not reach, and no push at all: the page shows the total alone, no forecast.
+    deye["items"] = [deye_item("K", kyiv(2026, 10, 19, 12, 0))]
+    inverter = reserve_page(site, kyiv(2026, 10, 19, 12, 1), deye=deye)["inverter"]
+    assert (inverter["grid_night_kwh"], inverter["grid_day_kwh"], inverter["pv_forecast_kwh"]) == (None, None, None)
+
+
+async def test_the_inverters_source_pushes_its_day_for_the_reserve_page(pipeline):
+    collector, _, _, _, edge = pipeline
+    day = {"grid_day": {"day": "2026-10-01", "marks": {"7": 2.1}, "night_start_h": 23, "night_end_h": 7},
+           "sun": {"2026-10-01": 6.4}}
+
+    async def inverter(source):
+        return day if source == "kem" else None
+    edge.inverter = inverter
+    await collector.cycle()
+    assert edge.calls[-1][2]["inverter"] == day
+
+    async def broken(source):
+        raise RuntimeError("no")
+    # The push goes out without it rather than not at all.
+    edge.inverter = broken
+    await collector.cycle()
+    assert edge.calls[-1][0] == "home" and "inverter" not in edge.calls[-1][2]
+
+
 async def test_the_batteries_source_pushes_what_the_reserve_reads_deye_with(pipeline):
     collector, _, _, _, edge = pipeline
     access = {"token": "t", "expires_at": 1, "base_url": "https://deye.test", "batteries": [["elevator", "1"]],

@@ -696,6 +696,10 @@ async def test_todays_sun_for_the_mini_app(make):
         body = await (await http.get("/sun")).json()
     assert body["date"] == "2026-10-17" and body["p50_kwh"] > body["low_kwh"] > 0
     assert body["p50_kwh"] == round(service.forecast.total_kwh(date(2026, 10, 17)), 2)
+    # Every day ahead the forecast covers, for the reserve on Cloudflare; today's first, as above.
+    days = body["days"]
+    assert list(days)[0] == "2026-10-17" and days["2026-10-17"] == body["p50_kwh"] and len(days) > 1
+    assert all(days[d] == round(service.forecast.total_kwh(date.fromisoformat(d)), 2) for d in days)
 
 
 # ---- every change of a day's table goes to the chat, with its reason ----

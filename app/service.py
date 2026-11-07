@@ -96,6 +96,7 @@ class Service:
             if self.edge is not None:
                 inverter, shown_with = self.inverter, settings.deye.batteries_source
                 self.edge.deye = lambda source: inverter.reserve_access() if source == shown_with else None
+                self.edge.inverter = self.inverter_day
         if self.edge is not None:
             self.edge.power = self.power_state
         self._tasks: list[asyncio.Task] = []
@@ -108,6 +109,17 @@ class Service:
         if self.inverter is not None and self.inverter.config.notify_grid:
             slots.append((self.inverter.source, GRID_SLOT))
         return slots
+
+    async def inverter_day(self, source: str) -> Optional[dict]:
+        """What the reserve's stand-in page needs to draw the inverter as the mini app here does: today's grid by
+        tariff so far and deye-reserve's sun forecast by day (its cached /sun), for the inverter's source only."""
+        if self.inverter is None or self.inverter.source != source:
+            return None
+        body = {"grid_day": self.inverter.grid_day.payload()}
+        days = (await self.reserve.sun() or {}).get("days")
+        if days:
+            body["sun"] = days
+        return body
 
     def power_state(self, source: str) -> Optional[PowerState]:
         """The power at a source's address as this service holds it, for the reserve to go on from."""

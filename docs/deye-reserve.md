@@ -246,6 +246,10 @@ the whole import, house and charger, under 4.5 kW.
   they were; nothing writes there any more.
 - `GET 127.0.0.1:9997/plan` (with `written_table`, `last_write` and
   `why` for the mini app) and `/health`.
+- `GET 127.0.0.1:9997/sun`: today's P50 and pessimistic kWh for the krem
+  mini app, and `days`, the P50 of every day from today the forecast
+  covers (three, since 07.11.2026), which dtek-service pushes to dtek-edge
+  so its stand-in page shows the day's forecast while the homelab is off.
 - `docker exec deye-reserve python -m deye_reserve.review [END]` lines a
   day's decisions up with Deye's history (SOC, grid bought by tariff, SOC
   in each outage), the plan's own day-ahead and morning sun and every

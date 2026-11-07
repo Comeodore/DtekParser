@@ -14,6 +14,9 @@ time, which airdanger needs.
   holds for the source (`power`), which the reserve goes on from. On a start, before the power is watched again,
   this service claims the power back and keeps the state the reserve left (take_back_power), so a change the
   reserve has reported is not reported again.
+- The mini app. The reserve stands in for it while this service's own is down. krem's pushes also carry what its
+  inverter diagram needs from here (`inverter`): today's grid by tariff so far and deye-reserve's sun forecast for
+  the days ahead, so the stand-in page splits the grid into night and day and shows the forecast as this one does.
 
 A failed call leaves the service working as without the reserve: it would rather repeat a message than lose one.
 """
@@ -21,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from typing import Callable, Iterable, Mapping, Optional
+from typing import Awaitable, Callable, Iterable, Mapping, Optional
 
 import aiohttp
 
@@ -37,6 +40,10 @@ AWAY_AFTER = timedelta(minutes=3)
 # A failed cycle says this service is alive at most this often; a failing source retries every 15 s at first.
 ALIVE_EVERY = timedelta(seconds=60)
 TIMEOUT = aiohttp.ClientTimeout(total=5)
+
+
+async def _nothing(source: str) -> Optional[dict]:
+    return None
 
 
 def power_body(state: Optional[PowerState]) -> Optional[dict]:
@@ -59,6 +66,9 @@ class Edge:
         self.deye: Callable[[str], Optional[dict]] = lambda source: None
         # Per source, the power state this service holds, which the reserve goes on from (set by Service).
         self.power: Callable[[str], Optional[PowerState]] = lambda source: None
+        # Per source, what the reserve's stand-in page needs to draw the inverter as here (set by Service): today's
+        # grid by tariff so far (`grid_day`, GridDay.payload) and deye-reserve's sun forecast by day (`sun`).
+        self.inverter: Callable[[str], Awaitable[Optional[dict]]] = _nothing
 
     def away(self, source: str, now: datetime) -> bool:
         """Whether the reserve may have taken this source over since its last push (or since the start)."""
@@ -90,6 +100,13 @@ class Edge:
         deye = self.deye(config.name)
         if deye is not None:
             body["deye"] = deye
+        try:
+            inverter = await self.inverter(config.name)
+        except Exception as e:
+            logger.warning(f"[{config.name}] the inverter's day not pushed: {type(e).__name__}: {e}")
+            inverter = None
+        if inverter is not None:
+            body["inverter"] = inverter
         if await self._post(config.name, "home", body) is not None:
             self._pushed[config.name] = now
             self._heard[config.name] = now
