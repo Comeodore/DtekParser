@@ -22,11 +22,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, Route, async_playwright
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 logger = logging.getLogger(__name__)
 
@@ -76,14 +78,60 @@ CALL_JS = """async (a) => {
         if (!response.ok) throw new Error(`getHomeNum HTTP ${response.status}: ${text.slice(0, 120)}`);
         try { return JSON.parse(text); }
         catch (e) { throw new Error(`getHomeNum returned non-JSON: ${text.slice(0, 120)}`); }
+    } catch (e) {
+        if (e.name === 'AbortError') throw new Error(`getHomeNum timed out after ${a.timeout} ms`);
+        throw e;
     } finally {
         clearTimeout(timer);
     }
 }"""
+# What the page shows when it has no schedule: whether it is still loading, and its words, to tell DTEK's
+# own trouble (overload, maintenance, a gateway error) from a page we no longer understand.
+PAGE_STATE_JS = """() => ({
+    state: document.readyState,
+    title: document.title || '',
+    text: ((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ').trim().slice(0, 1000),
+})"""
+# Lower-case fragments of the notices DTEK or its gateway show instead of the page when they cannot serve it.
+# Phrases only such a notice says count anywhere; bare words about load only on a short page: the schedule
+# page itself (~1500 characters) asks people to "зменшити навантаження на мережу".
+SITE_BUSY_PHRASES = (
+    "сайт перевантаж", "навантаження на сайт", "навантаження на ресурс", "спробуйте пізніше", "спробуйте ще раз",
+    "тимчасово недоступ", "service unavailable", "temporarily unavailable", "bad gateway", "gateway time",
+)
+LOAD_WORDS = ("навантаж", "перевантаж", "технічні роботи", "overload", "too many")
+SHORT_PAGE_CHARS = 600
+# Chromium's network errors that mean the site did not answer, rather than that we were turned away.
+NET_DOWN_MARKERS = (
+    "net::ERR_CONNECTION_", "net::ERR_EMPTY_RESPONSE", "net::ERR_TIMED_OUT", "net::ERR_HTTP2_PROTOCOL_ERROR",
+    "Failed to fetch",
+)
 
 
 class FetchError(Exception):
     """The site could not be read this time; the caller just tries again later."""
+
+
+class SiteDown(FetchError):
+    """DTEK's site itself is down, overloaded or too slow: nothing on our side to fix, only to wait out."""
+
+
+def overloaded(text: str) -> bool:
+    """Whether a page's (or an answer's) words say the site cannot serve it now."""
+    low = text.lower()
+    return (any(phrase in low for phrase in SITE_BUSY_PHRASES)
+            or (len(text) < SHORT_PAGE_CHARS and any(word in low for word in LOAD_WORDS)))
+
+
+def site_down(error: BaseException) -> bool:
+    """Whether an error of a fetch is DTEK's site not serving us, as opposed to a change or a block to look at."""
+    if isinstance(error, FetchError):
+        return isinstance(error, SiteDown)
+    if isinstance(error, (TimeoutError, PlaywrightTimeoutError)):
+        return True
+    text = str(error)
+    return ("timed out" in text or "AbortError" in text or any(m in text for m in NET_DOWN_MARKERS)
+            or re.search(r"HTTP 5\d\d", text) is not None or overloaded(text))
 
 
 @dataclass(frozen=True)
@@ -211,7 +259,8 @@ class DtekSite:
                 raise FetchError(f"getHomeNum answered result={answer.get('result') if isinstance(answer, dict) else answer!r}")
         except Exception as e:
             await self._on_failure(e)
-            raise FetchError(f"{type(e).__name__}: {e}") from e
+            kind = SiteDown if site_down(e) else FetchError
+            raise kind(f"{type(e).__name__}: {e}") from e
 
         if self._failures:
             logger.info(f"[{self._name}] site reachable again after {self._failures} failed attempts")
@@ -242,8 +291,8 @@ class DtekSite:
             self._context_created = time.monotonic()
         page = await self._context.new_page()
         try:
-            await page.goto(self._url, wait_until="domcontentloaded", timeout=self.PAGE_TIMEOUT_MS)
-            await self._wait_ready(page)
+            response = await page.goto(self._url, wait_until="domcontentloaded", timeout=self.PAGE_TIMEOUT_MS)
+            await self._wait_ready(page, response.status if response else None)
             await page.add_style_tag(content=NO_ANIMATIONS_CSS)
             info = await page.evaluate(READ_JS)
             if not info.get("csrfToken"):
@@ -299,7 +348,7 @@ class DtekSite:
             logger.warning(f"[{self._name}] could not park the tab on {target} ({status}); "
                            f"requests still work, the page just keeps using CPU")
 
-    async def _wait_ready(self, page: Page) -> None:
+    async def _wait_ready(self, page: Page, status: Optional[int] = None) -> None:
         deadline = time.monotonic() + self.READY_TIMEOUT_S
         while True:
             remaining_ms = max(1000, int((deadline - time.monotonic()) * 1000))
@@ -315,7 +364,28 @@ class DtekSite:
                 if any("hcaptcha.com" in frame.url for frame in page.frames):
                     raise FetchError("Incapsula shows an hCaptcha; solve it with tools/solve_captcha.sh "
                                      f"{self._name}") from e
-                raise
+                if not isinstance(e, PlaywrightTimeoutError):
+                    raise
+                raise await self._no_schedule(page, status) from e
+
+    async def _no_schedule(self, page: Page, status: Optional[int]) -> FetchError:
+        """Why the page came without its schedule: DTEK's trouble (a 5xx, an overload or maintenance notice, a
+        page still loading) is SiteDown; a finished page we do not recognise is ours to look at."""
+        try:
+            state = await asyncio.wait_for(page.evaluate(PAGE_STATE_JS), timeout=5)
+        except Exception as e:
+            return SiteDown(f"page has no schedule after {self.READY_TIMEOUT_S:.0f} s and does not answer "
+                            f"({type(e).__name__})")
+        title, text = state.get("title") or "", state.get("text") or ""
+        shown = f"status {status}, {state.get('state')}, {title!r}: {text[:200]!r}"
+        if (status is not None and status >= 500) or overloaded(f"{title} {text}".strip()):
+            return SiteDown(f"DTEK's site shows it is down or overloaded ({shown})")
+        if state.get("state") != "complete":
+            return SiteDown(f"page still loading after {self.READY_TIMEOUT_S:.0f} s ({shown})")
+        # Incapsula's JavaScript check shows an empty page until it lets us through; so does a site sending nothing.
+        if not title.strip() and not text:
+            return SiteDown(f"page still blank after {self.READY_TIMEOUT_S:.0f} s ({shown})")
+        return FetchError(f"page has no schedule data ({shown})")
 
     async def _on_failure(self, error: Exception) -> None:
         self._failures += 1

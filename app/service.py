@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
-from app.collector import SourceCollector, error_kind
+from app.collector import SourceCollector
 from app.config import Settings
 from app.dtek.client import BrowserPool, DtekSite
 from app.edge import Edge
@@ -166,9 +166,9 @@ class Service:
 
         found = []
         for c in self.collectors.values():
-            if not c.healthy(now):
-                kind = f" ({error_kind(c.first_error)})" if c.first_error else ""
-                found.append((c.name, f"no DTEK data since {since(c.last_success)}{kind}", c.last_error))
+            reason = c.problem(now)
+            if reason:
+                found.append((c.name, reason, c.last_error))
         if self.power is not None and not self.power.connected:
             found.append(("power", f"Home Assistant not connected since {since(self.power.lost_at)}", ""))
         if self.outbox.last_cycle is None or time.monotonic() - self.outbox.last_cycle > self.OUTBOX_STALE_S:
