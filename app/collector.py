@@ -32,8 +32,6 @@ def error_kind(error: str) -> str:
         return "Incapsula challenge"
     if "no schedule data" in error:
         return "page not recognised"
-    if "down or overloaded" in error:
-        return "site overloaded"
     status = re.search(r"HTTP (\d{3})", error)
     if status:
         return f"HTTP {status.group(1)}"

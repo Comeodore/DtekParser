@@ -230,7 +230,7 @@ async def test_our_failure_after_the_site_was_down_counts_from_its_own_start(dow
 @pytest.mark.parametrize("error, kind", [
     ("fetch: Error: Page.evaluate: AbortError: signal is aborted without reason", "timeout"),
     ("fetch: Error: Page.evaluate: Error: getHomeNum timed out after 15000 ms", "timeout"),
-    ("fetch: SiteDown: DTEK's site shows it is down or overloaded (status 200, complete, '': 'x')", "site overloaded"),
+    ("fetch: SiteDown: page answered HTTP 503 (status 503, complete, '': 'x')", "HTTP 503"),
     ("fetch: FetchError: page has no schedule data (status 200, complete, 'DTEK': 'x')", "page not recognised"),
     ("fetch: SiteDown: page still loading after 30 s (status 200, interactive, '': '')", "timeout"),
 ])
