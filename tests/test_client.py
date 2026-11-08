@@ -52,6 +52,8 @@ def site():
     (page(state="interactive", title="Відсутня електроенергія?", text="Перевірка поточних відключень"), 200),
     (page(), 200),
     (page(title="ДТЕК", text="Сайт перевантажений. " + "Меню " * 300), 200),
+    (page(title="ДТЕК", text="Меню " * 300 + "Сайт тимчасово перевантажено, спробуйте зайти пізніше"), 200),
+    (page(title="ДТЕК", text="Меню " * 300 + "Через велике навантаження на сервери сторінка недоступна"), 200),
     (FakePage(fail=True), 200),
 ])
 async def test_a_page_without_schedule_is_the_site_down(site, shown, status):
@@ -72,3 +74,22 @@ async def test_load_words_on_the_full_schedule_page_are_not_an_overload(site):
 async def test_an_incapsula_block_page_is_ours(site):
     shown = page(text="Request unsuccessful. Incapsula incident ID: 1234-5678")
     assert type(await site._no_schedule(shown, 200)) is FetchError
+
+
+async def test_grid_load_texts_of_the_real_page_are_not_an_overload(site):
+    # Visible on dtek-kem/dtek-krem's shutdowns page on a normal day.
+    text = ("Будь ласка, розумно споживайте електроенергію — це допоможе зменшити навантаження на мережу. "
+            "Друга можлива причина – локальна аварія через перевантаження мереж. "
+            "І коли ми вмикаємо її одночасно з іншими приладами, то перевантажуємо мережу. "
+            "Якщо стається аварія, перевантаження або новий обстріл — він може змінюватися. " * 4)
+    assert type(await site._no_schedule(page(title="Відсутня електроенергія?", text=text), 200)) is FetchError
+
+
+async def test_the_page_without_schedule_is_kept(tmp_path):
+    site = DtekSite(None, "krem", "https://x", "s", None, state_path=str(tmp_path / "state-krem.json"))
+
+    class Page(FakePage):
+        async def content(self):
+            return "<html>Сайт перевантажений</html>"
+    await site._no_schedule(Page({"state": "complete", "title": "", "text": "Сайт перевантажений"}), 200)
+    assert (tmp_path / "no-schedule-krem.html").read_text(encoding="utf-8") == "<html>Сайт перевантажений</html>"

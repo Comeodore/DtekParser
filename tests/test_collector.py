@@ -189,17 +189,15 @@ async def fail_until(collector, clock, minutes):
         assert not await collector.cycle()
 
 
-async def test_dtek_site_down_is_waited_out_for_hours(down_pipeline):
+async def test_dtek_site_down_is_waited_out_without_alarm(down_pipeline):
     collector, site, clock = down_pipeline
     assert await collector.cycle()
     site.error = SiteDown("TimeoutError: Page.goto: Timeout 45000ms exceeded.")
-    await fail_until(collector, clock, range(1, 179))
+    await fail_until(collector, clock, [1, 2, 3, 60, 24 * 60])
     assert not collector.healthy() and collector.problem() is None
-    await fail_until(collector, clock, [180])
-    assert collector.problem() == "no DTEK data since 01.10 18:00 (timeout)"
     site.error = None
     assert await collector.cycle()
-    assert collector.problem() is None and not collector.site_down and collector.failing_since is None
+    assert collector.problem() is None and not collector.site_down and collector.ours_since is None
 
 
 async def test_our_own_failure_alarms_within_minutes_as_before(down_pipeline):

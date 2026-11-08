@@ -161,13 +161,16 @@ tunnel. The service picks the saved cookies up on its next attempt.
   check passes: both addresses fetched within 3 minutes, Home Assistant
   connected, the delivery loop cycling. `GET /api/v1/health` lists which
   check fails, and the log says so the moment the heartbeat pauses.
-- DTEK's own site being down or overloaded (timeouts, a 5xx, its "try
-  later" notice, a page that stays blank or loading) is not a failing
-  check: nothing here would fix it, and it happens for a while after many
-  schedule changes. It is waited out, and only alarms after 3 hours without
-  data. Anything else (an hCaptcha, a page we no longer recognise, a 4xx, a
-  parse or store error) alarms after 3 minutes, as before. The log names
-  which one it is (`app/dtek/client.py` `SiteDown`).
+- DTEK's own site being down or overloaded (timeouts, a 5xx, its notice
+  that the site is overloaded or to try later, a page that stays blank or
+  loading) is not a failing check, however long it lasts: nothing here
+  would fix it, and it happens for a while after many schedule changes. It
+  is only waited out. Anything else (an hCaptcha, a page we no longer
+  recognise, a 4xx, a parse or store error) alarms after 3 minutes, as
+  before. The log names which one it is (`app/dtek/client.py` `SiteDown`).
+  The latest page that came without its schedule is kept in
+  `data/no-schedule-<source>.html`, so DTEK's wording can be read and added
+  to `SITE_BUSY_PATTERNS` if it was not recognised.
 
 ## Run
 

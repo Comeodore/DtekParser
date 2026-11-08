@@ -92,14 +92,16 @@ PAGE_STATE_JS = """() => ({
     title: document.title || '',
     text: ((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ').trim().slice(0, 1000),
 })"""
-# Lower-case fragments of the notices DTEK or its gateway show instead of the page when they cannot serve it.
-# Phrases only such a notice says count anywhere; bare words about load only on a short page: the schedule
-# page itself (~1500 characters) asks people to "зменшити навантаження на мережу".
-SITE_BUSY_PHRASES = (
-    "сайт перевантаж", "навантаження на сайт", "навантаження на ресурс", "спробуйте пізніше", "спробуйте ще раз",
-    "тимчасово недоступ", "service unavailable", "temporarily unavailable", "bad gateway", "gateway time",
+# What DTEK or its gateway say instead of the page when they cannot serve it, lower-cased. The schedule page
+# itself talks about the power grid's load at length ("перевантаження мереж", "зменшити навантаження на
+# мережу"), so only words about the site itself count anywhere; bare words about load only on a short page.
+SITE_BUSY_PATTERNS = re.compile(
+    r"сайт\w*(?:\s+\S+){0,4}?\s+(?:пере|на)вантаж"     # "сайт (тимчасово) перевантажений"
+    r"|(?:пере|на)вантаж\w*(?:\s+\S+){0,3}?\s+(?:на\s+)?(?:сайт|ресурс|сервер|портал)"  # "навантаження на сайт"
+    r"|спробуйте\s+(?:\S+\s+){0,2}?пізніше|тимчасово\s+недоступ|черга\s+на\s+сайт"
+    r"|service unavailable|temporarily unavailable|bad gateway|gateway time|too many requests"
 )
-LOAD_WORDS = ("навантаж", "перевантаж", "технічні роботи", "overload", "too many")
+LOAD_WORDS = ("навантаж", "перевантаж", "технічні роботи", "overload")
 SHORT_PAGE_CHARS = 600
 # Chromium's network errors that mean the site did not answer, rather than that we were turned away.
 NET_DOWN_MARKERS = (
@@ -119,7 +121,7 @@ class SiteDown(FetchError):
 def overloaded(text: str) -> bool:
     """Whether a page's (or an answer's) words say the site cannot serve it now."""
     low = text.lower()
-    return (any(phrase in low for phrase in SITE_BUSY_PHRASES)
+    return (SITE_BUSY_PATTERNS.search(low) is not None
             or (len(text) < SHORT_PAGE_CHARS and any(word in low for word in LOAD_WORDS)))
 
 
@@ -377,6 +379,8 @@ class DtekSite:
             return SiteDown(f"page has no schedule after {self.READY_TIMEOUT_S:.0f} s and does not answer "
                             f"({type(e).__name__})")
         title, text = state.get("title") or "", state.get("text") or ""
+        if text:
+            await self._keep_page(page)
         shown = f"status {status}, {state.get('state')}, {title!r}: {text[:200]!r}"
         if (status is not None and status >= 500) or overloaded(f"{title} {text}".strip()):
             return SiteDown(f"DTEK's site shows it is down or overloaded ({shown})")
@@ -386,6 +390,19 @@ class DtekSite:
         if not title.strip() and not text:
             return SiteDown(f"page still blank after {self.READY_TIMEOUT_S:.0f} s ({shown})")
         return FetchError(f"page has no schedule data ({shown})")
+
+    async def _keep_page(self, page: Page) -> None:
+        """Keep the latest page that came without a schedule next to the cookies (no-schedule-<source>.html), so
+        DTEK's exact wording can be read afterwards. Best effort."""
+        if not self._state_path:
+            return
+        path = os.path.join(os.path.dirname(self._state_path) or ".", f"no-schedule-{self._name}.html")
+        try:
+            html = await asyncio.wait_for(page.content(), timeout=5)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(html)
+        except Exception as e:
+            logger.warning(f"[{self._name}] could not keep the page in {path}: {e}")
 
     async def _on_failure(self, error: Exception) -> None:
         self._failures += 1

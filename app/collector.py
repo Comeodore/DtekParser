@@ -23,9 +23,6 @@ logger = logging.getLogger(__name__)
 
 # Three missed cycles: one slow or failed fetch is retried within seconds and is no reason for alarm.
 STALE_AFTER = timedelta(minutes=3)
-# DTEK's own site being down or overloaded (it is, for a while after most schedule changes) is waited out:
-# nothing on our side would fix it. Only an outage this long is worth a look.
-SITE_DOWN_PATIENCE = timedelta(hours=3)
 
 
 def error_kind(error: str) -> str:
@@ -88,7 +85,6 @@ class SourceCollector:
         self.last_error = ""
         # The error that began the current run of failures; it names the trouble in the alert while it lasts.
         self.first_error = ""
-        self.failing_since: Optional[datetime] = None
         # Whether the latest failure was DTEK's site not serving us (SiteDown), which is waited out.
         self.site_down = False
         # The run of our own failures at the end of the current streak (anything but SiteDown): since when, and
@@ -107,21 +103,15 @@ class SourceCollector:
         return self.last_success is not None and now - self.last_success < STALE_AFTER
 
     def problem(self, now: Optional[datetime] = None) -> Optional[str]:
-        """Why this source needs a look, or None. Stale data does, unless DTEK's own site is what keeps it stale:
-        that is waited out up to SITE_DOWN_PATIENCE. The text stays the same while the trouble lasts, as it labels
-        Grafana's alert."""
+        """Why this source needs a look, or None. Stale data does, unless DTEK's own site is what keeps it stale
+        (down, overloaded, too slow): that is only waited out, however long, as nothing here would fix it. The text
+        stays the same while the trouble lasts, as it labels Grafana's alert."""
         now = now or self._clock()
-        if self.healthy(now):
-            return None
-        since = _moment(self.last_success)
-        stale_from = self.last_success or self.failing_since
-        if self.failures and stale_from is not None and now - stale_from >= SITE_DOWN_PATIENCE:
-            return f"no DTEK data since {since}{_kind(self.first_error)}"
-        if self.failures and self.site_down:
+        if self.healthy(now) or (self.failures and self.site_down):
             return None
         if self.ours_since is not None and now - self.ours_since < STALE_AFTER:
             return None
-        return f"no DTEK data since {since}{_kind(self.ours_error or self.first_error)}"
+        return f"no DTEK data since {_moment(self.last_success)}{_kind(self.ours_error or self.first_error)}"
 
     async def restore(self) -> None:
         """Serve the last known snapshot until the first fetch succeeds."""
@@ -187,7 +177,7 @@ class SourceCollector:
         if self.failures:
             logger.info(f"[{self.name}] recovered after {self.failures} failed cycles")
         self.failures, self.last_error, self.first_error = 0, "", ""
-        self.failing_since, self.site_down, self.ours_since, self.ours_error = None, False, None, ""
+        self.site_down, self.ours_since, self.ours_error = False, None, ""
         previous = self.latest
         self.latest, self.last_success = snapshot, now
         if self._on_schedule and previous is not None and (
@@ -214,10 +204,9 @@ class SourceCollector:
             log = logger.warning if self.failures < 3 or down else logger.error
             log(f"[{self.name}] cycle failed ({self.failures} in a row): {text}")
         if down and not self.site_down:
-            logger.warning(f"[{self.name}] DTEK's site is down or overloaded: waiting it out, "
-                           f"alarm only after {SITE_DOWN_PATIENCE.total_seconds() / 3600:g} h without data")
+            logger.warning(f"[{self.name}] DTEK's site is down or overloaded: waiting it out, no alarm")
         if self.failures == 1:
-            self.first_error, self.failing_since = text, now
+            self.first_error = text
         if down:
             self.ours_since, self.ours_error = None, ""
         elif self.ours_since is None:
