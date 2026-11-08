@@ -30,24 +30,14 @@ def error_kind(error: str) -> str:
     or else where it failed and the exception's name."""
     if "challenge" in error or "hCaptcha" in error:
         return "Incapsula challenge"
-    if "no schedule data" in error:
-        return "page not recognised"
     status = re.search(r"HTTP (\d{3})", error)
     if status:
         return f"HTTP {status.group(1)}"
-    if any(word in error for word in ("Timeout", "timed out", "AbortError", "still loading", "still blank", "does not answer")):
+    if "Timeout" in error or "AbortError" in error:
         return "timeout"
     stage, _, rest = error.partition(": ")
     name = re.match(r"\w+", rest)
     return f"{stage}: {name.group(0)}" if name else stage
-
-
-def _kind(error: str) -> str:
-    return f" ({error_kind(error)})" if error else ""
-
-
-def _moment(moment: Optional[datetime]) -> str:
-    return moment.astimezone(KYIV_TZ).strftime("%d.%m %H:%M") if moment else "the start"
 
 
 class Site(Protocol):
@@ -83,12 +73,8 @@ class SourceCollector:
         self.last_error = ""
         # The error that began the current run of failures; it names the trouble in the alert while it lasts.
         self.first_error = ""
-        # Whether the latest failure was DTEK's site not serving us (SiteDown), which is waited out.
+        # The latest failure was DTEK's site not answering: waited out, no alarm.
         self.site_down = False
-        # The run of our own failures at the end of the current streak (anything but SiteDown): since when, and
-        # the error it began with.
-        self.ours_since: Optional[datetime] = None
-        self.ours_error = ""
         self._warned_time_types: set[str] = set()
 
     @property
@@ -96,20 +82,12 @@ class SourceCollector:
         return self.config.name
 
     def healthy(self, now: Optional[datetime] = None) -> bool:
-        """Whether the data is fresh. The mini app says so; whether to raise an alarm is problem()'s call."""
         now = now or self._clock()
         return self.last_success is not None and now - self.last_success < STALE_AFTER
 
-    def problem(self, now: Optional[datetime] = None) -> Optional[str]:
-        """Why this source needs a look, or None. Stale data does, unless DTEK's own site is what keeps it stale
-        (down, overloaded, too slow): that is only waited out, however long, as nothing here would fix it. The text
-        stays the same while the trouble lasts, as it labels Grafana's alert."""
-        now = now or self._clock()
-        if self.healthy(now) or (self.failures and self.site_down):
-            return None
-        if self.ours_since is not None and now - self.ours_since < STALE_AFTER:
-            return None
-        return f"no DTEK data since {_moment(self.last_success)}{_kind(self.ours_error or self.first_error)}"
+    def alarming(self, now: Optional[datetime] = None) -> bool:
+        """Stale data is worth an alarm unless DTEK's site not answering is why."""
+        return not self.healthy(now) and not (self.failures and self.site_down)
 
     async def restore(self) -> None:
         """Serve the last known snapshot until the first fetch succeeds."""
@@ -140,17 +118,17 @@ class SourceCollector:
         try:
             raw = await self._site.fetch()
         except FetchError as e:
-            self._failed("fetch", e, now)
+            self._failed("fetch", e)
             return False
         try:
             snapshot = build_snapshot(
                 self.name, parse_house(raw.answer, self.config.building), parse_fact(raw.fact), raw.names, now
             )
         except ProtocolError as e:
-            self._failed("protocol", e, now)
+            self._failed("protocol", e)
             return False
         except Exception as e:
-            self._failed(f"parse ({type(e).__name__})", e, now)
+            self._failed(f"parse ({type(e).__name__})", e)
             return False
         self._warn_time_types(raw.time_types)
 
@@ -169,13 +147,12 @@ class SourceCollector:
                 await tx.save_legacy_schedule(self.config.schedule_id, legacy_row(snapshot, now.astimezone(KYIV_TZ).date()))
                 await tx.enqueue(messages)
         except Exception as e:
-            self._failed("store", e, now)
+            self._failed("store", e)
             return False
 
         if self.failures:
             logger.info(f"[{self.name}] recovered after {self.failures} failed cycles")
-        self.failures, self.last_error, self.first_error = 0, "", ""
-        self.site_down, self.ours_since, self.ours_error = False, None, ""
+        self.failures, self.last_error, self.first_error, self.site_down = 0, "", "", False
         previous = self.latest
         self.latest, self.last_success = snapshot, now
         if self._on_schedule and previous is not None and (
@@ -192,26 +169,16 @@ class SourceCollector:
             await self._edge.push(self.config, detection.baseline.to_dict(), now)
         return True
 
-    def _failed(self, stage: str, error: Exception, now: datetime) -> None:
+    def _failed(self, stage: str, error: Exception) -> None:
         self.failures += 1
         text = f"{stage}: {error}"
-        down = isinstance(error, SiteDown)
-        # Log the first failure, every change of error, and then every 10th repeat. DTEK's site being down is
-        # only a warning: it is waited out.
+        # Log the first failure, every change of error, and then every 10th repeat.
         if self.failures == 1 or text != self.last_error or self.failures % 10 == 0:
-            log = logger.warning if self.failures < 3 or down else logger.error
+            log = logger.warning if self.failures < 3 else logger.error
             log(f"[{self.name}] cycle failed ({self.failures} in a row): {text}")
-        if down and not self.site_down:
-            logger.warning(f"[{self.name}] DTEK's site is down or overloaded: waiting it out, no alarm")
-        if self.failures == 1:
+        down = isinstance(error, SiteDown)
+        if self.failures == 1 or (self.site_down and not down):
             self.first_error = text
-        if down:
-            self.ours_since, self.ours_error = None, ""
-        elif self.ours_since is None:
-            # Trouble of ours right after good data counts from that data, as before; after the site was down,
-            # from now.
-            self.ours_since = self.last_success if self.failures == 1 and self.last_success else now
-            self.ours_error = text
         self.site_down = down
         self.last_error = text
 

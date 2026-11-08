@@ -1,7 +1,6 @@
 """The whole pipeline (site -> detector -> store -> outbox) with fakes at the edges."""
 import copy
 import json
-from datetime import timedelta
 
 import pytest
 
@@ -102,6 +101,7 @@ async def test_first_error_names_a_run_of_failures(pipeline):
 @pytest.mark.parametrize("error, kind", [
     ("fetch: Error: Page.evaluate: Error: getHomeNum HTTP 502: <html>", "HTTP 502"),
     ("fetch: TimeoutError: Page.wait_for_function: Timeout 29999ms exceeded.", "timeout"),
+    ("fetch: Error: Page.evaluate: AbortError: signal is aborted without reason", "timeout"),
     ("fetch: Incapsula shows an hCaptcha; solve it with tools/solve_captcha.sh", "Incapsula challenge"),
     ("fetch: getHomeNum answered result=False", "fetch: getHomeNum"),
     ("store: ConnectionRefusedError: [Errno 111]", "store: ConnectionRefusedError"),
@@ -163,76 +163,29 @@ async def test_krem_does_not_get_outage_notices(settings):
     assert collector.latest.outage is not None
 
 
-class SiteDownSite(FakeSite):
-    """FakeSite whose failures are chosen per cycle: SiteDown (DTEK's trouble) or FetchError (ours)."""
+async def test_dtek_site_not_answering_is_waited_out_without_alarm(pipeline):
+    collector, site, _, clock = pipeline
+    assert await collector.cycle()
 
-    def __init__(self):
-        super().__init__()
-        self.error = None
-
-    async def fetch(self):
-        if self.error is not None:
-            raise self.error
-        return await super().fetch()
-
-
-@pytest.fixture
-def down_pipeline(settings):
-    store, site, clock = MemoryStore(), SiteDownSite(), {"now": kyiv(2026, 10, 1, 18)}
-    collector = SourceCollector(settings.source("kem"), site, store, Router(settings), clock=lambda: clock["now"])
-    return collector, site, clock
-
-
-async def fail_until(collector, clock, minutes):
-    for minute in minutes:
-        clock["now"] = kyiv(2026, 10, 1, 18) + timedelta(minutes=minute)
+    async def timeout():
+        raise SiteDown("TimeoutError: Page.goto: Timeout 45000ms exceeded.")
+    original, site.fetch = site.fetch, timeout
+    for clock["now"] in (kyiv(2026, 10, 1, 18, 1), kyiv(2026, 10, 1, 18, 3), kyiv(2026, 10, 1, 23)):
         assert not await collector.cycle()
-
-
-async def test_dtek_site_down_is_waited_out_without_alarm(down_pipeline):
-    collector, site, clock = down_pipeline
+    assert not collector.healthy() and not collector.alarming()
+    site.fetch = original
     assert await collector.cycle()
-    site.error = SiteDown("TimeoutError: Page.goto: Timeout 45000ms exceeded.")
-    await fail_until(collector, clock, [1, 2, 3, 60, 24 * 60])
-    assert not collector.healthy() and collector.problem() is None
-    site.error = None
+    assert not collector.site_down
+
+
+async def test_other_failures_alarm_after_3_minutes_as_before(pipeline):
+    collector, site, _, clock = pipeline
     assert await collector.cycle()
-    assert collector.problem() is None and not collector.site_down and collector.ours_since is None
-
-
-async def test_our_own_failure_alarms_within_minutes_as_before(down_pipeline):
-    collector, site, clock = down_pipeline
-    assert await collector.cycle()
-    site.error = FetchError("Incapsula shows an hCaptcha; solve it with tools/solve_captcha.sh kem")
-    await fail_until(collector, clock, [1, 2])
-    assert collector.problem() is None
-    await fail_until(collector, clock, [3])
-    assert collector.problem() == "no DTEK data since 01.10 18:00 (Incapsula challenge)"
-
-
-async def test_our_failure_after_the_site_was_down_counts_from_its_own_start(down_pipeline):
-    collector, site, clock = down_pipeline
-    assert await collector.cycle()
-    site.error = SiteDown("Error: Page.evaluate: Error: getHomeNum timed out after 15000 ms")
-    await fail_until(collector, clock, range(1, 61))
-    assert collector.problem() is None
-    site.error = FetchError("page has no schedule data (status 200, complete, 'DTEK': 'new layout')")
-    await fail_until(collector, clock, [61, 62, 63])
-    assert collector.problem() is None
-    await fail_until(collector, clock, [64])
-    assert collector.problem() == "no DTEK data since 01.10 18:00 (page not recognised)"
-    # The site going down again puts the alarm back to waiting.
-    site.error = SiteDown("TimeoutError: Page.goto: Timeout 45000ms exceeded.")
-    await fail_until(collector, clock, [65])
-    assert collector.problem() is None
-
-
-@pytest.mark.parametrize("error, kind", [
-    ("fetch: Error: Page.evaluate: AbortError: signal is aborted without reason", "timeout"),
-    ("fetch: Error: Page.evaluate: Error: getHomeNum timed out after 15000 ms", "timeout"),
-    ("fetch: SiteDown: page answered HTTP 503 (status 503, complete, '': 'x')", "HTTP 503"),
-    ("fetch: FetchError: page has no schedule data (status 200, complete, 'DTEK': 'x')", "page not recognised"),
-    ("fetch: SiteDown: page still loading after 30 s (status 200, interactive, '': '')", "timeout"),
-])
-def test_error_kind_of_dtek_trouble(error, kind):
-    assert error_kind(error) == kind
+    site.fail = True  # FetchError, not SiteDown
+    for minute in (1, 2):
+        clock["now"] = kyiv(2026, 10, 1, 18, minute)
+        assert not await collector.cycle()
+    assert not collector.alarming()
+    clock["now"] = kyiv(2026, 10, 1, 18, 3)
+    assert not await collector.cycle()
+    assert collector.alarming()

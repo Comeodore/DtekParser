@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -78,25 +77,10 @@ CALL_JS = """async (a) => {
         if (!response.ok) throw new Error(`getHomeNum HTTP ${response.status}: ${text.slice(0, 120)}`);
         try { return JSON.parse(text); }
         catch (e) { throw new Error(`getHomeNum returned non-JSON: ${text.slice(0, 120)}`); }
-    } catch (e) {
-        if (e.name === 'AbortError') throw new Error(`getHomeNum timed out after ${a.timeout} ms`);
-        throw e;
     } finally {
         clearTimeout(timer);
     }
 }"""
-# What the page shows when it has no schedule: whether it is still loading or blank (DTEK's trouble) or a
-# finished page we do not recognise.
-PAGE_STATE_JS = """() => ({
-    state: document.readyState,
-    title: document.title || '',
-    text: ((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ').trim().slice(0, 1000),
-})"""
-# Chromium's network errors that mean the site did not answer, rather than that we were turned away.
-NET_DOWN_MARKERS = (
-    "net::ERR_CONNECTION_", "net::ERR_EMPTY_RESPONSE", "net::ERR_TIMED_OUT", "net::ERR_HTTP2_PROTOCOL_ERROR",
-    "Failed to fetch",
-)
 
 
 class FetchError(Exception):
@@ -104,18 +88,7 @@ class FetchError(Exception):
 
 
 class SiteDown(FetchError):
-    """DTEK's site itself is down, overloaded or too slow: nothing on our side to fix, only to wait out."""
-
-
-def site_down(error: BaseException) -> bool:
-    """Whether an error of a fetch is DTEK's site not serving us, as opposed to a change or a block to look at."""
-    if isinstance(error, FetchError):
-        return isinstance(error, SiteDown)
-    if isinstance(error, (TimeoutError, PlaywrightTimeoutError)):
-        return True
-    text = str(error)
-    return ("timed out" in text or "AbortError" in text or any(m in text for m in NET_DOWN_MARKERS)
-            or re.search(r"HTTP 5\d\d", text) is not None)
+    """DTEK's site did not answer in time (as on 08.11 22:05-22:51, after a schedule update): only waited out."""
 
 
 @dataclass(frozen=True)
@@ -244,8 +217,9 @@ class DtekSite:
                 raise FetchError(f"getHomeNum answered result={answer.get('result') if isinstance(answer, dict) else answer!r}")
         except Exception as e:
             await self._on_failure(e)
-            kind = SiteDown if site_down(e) else FetchError
-            raise kind(f"{type(e).__name__}: {e}") from e
+            # AbortError: getHomeNum cut off by CALL_JS's own timer.
+            timed_out = isinstance(e, (TimeoutError, PlaywrightTimeoutError)) or "AbortError" in str(e)
+            raise (SiteDown if timed_out else FetchError)(f"{type(e).__name__}: {e}") from e
 
         if self._failures:
             logger.info(f"[{self._name}] site reachable again after {self._failures} failed attempts")
@@ -276,8 +250,8 @@ class DtekSite:
             self._context_created = time.monotonic()
         page = await self._context.new_page()
         try:
-            response = await page.goto(self._url, wait_until="domcontentloaded", timeout=self.PAGE_TIMEOUT_MS)
-            await self._wait_ready(page, response.status if response else None)
+            await page.goto(self._url, wait_until="domcontentloaded", timeout=self.PAGE_TIMEOUT_MS)
+            await self._wait_ready(page)
             await page.add_style_tag(content=NO_ANIMATIONS_CSS)
             info = await page.evaluate(READ_JS)
             if not info.get("csrfToken"):
@@ -333,7 +307,7 @@ class DtekSite:
             logger.warning(f"[{self._name}] could not park the tab on {target} ({status}); "
                            f"requests still work, the page just keeps using CPU")
 
-    async def _wait_ready(self, page: Page, status: Optional[int] = None) -> None:
+    async def _wait_ready(self, page: Page) -> None:
         deadline = time.monotonic() + self.READY_TIMEOUT_S
         while True:
             remaining_ms = max(1000, int((deadline - time.monotonic()) * 1000))
@@ -349,38 +323,12 @@ class DtekSite:
                 if any("hcaptcha.com" in frame.url for frame in page.frames):
                     raise FetchError("Incapsula shows an hCaptcha; solve it with tools/solve_captcha.sh "
                                      f"{self._name}") from e
-                if not isinstance(e, PlaywrightTimeoutError):
-                    raise
-                raise await self._no_schedule(page, status) from e
+                if isinstance(e, PlaywrightTimeoutError):
+                    await self._snapshot(page)
+                raise
 
-    async def _no_schedule(self, page: Page, status: Optional[int]) -> FetchError:
-        """Why the page came without its schedule: a 5xx or a page still loading or blank is DTEK's trouble
-        (SiteDown); a finished page we do not recognise is ours to look at. Whatever the page did show is kept
-        (_snapshot), so its wording can be recognised once it is known."""
-        try:
-            state = await asyncio.wait_for(page.evaluate(PAGE_STATE_JS), timeout=5)
-        except Exception as e:
-            return SiteDown(f"page has no schedule after {self.READY_TIMEOUT_S:.0f} s and does not answer "
-                            f"({type(e).__name__})")
-        title, text = state.get("title") or "", state.get("text") or ""
-        shown = f"status {status}, {state.get('state')}, {title!r}: {text[:200]!r}"
-        if status is not None and status >= 500:
-            error: FetchError = SiteDown(f"page answered HTTP {status} ({shown})")
-        elif state.get("state") != "complete":
-            error = SiteDown(f"page still loading after {self.READY_TIMEOUT_S:.0f} s ({shown})")
-        elif not title.strip() and not text:
-            # Incapsula's JavaScript check shows an empty page until it lets us through; so does a site sending
-            # nothing.
-            error = SiteDown(f"page still blank after {self.READY_TIMEOUT_S:.0f} s ({shown})")
-        else:
-            error = FetchError(f"page has no schedule data ({shown})")
-        if title.strip() or text:
-            await self._snapshot(page, status, error)
-        return error
-
-    async def _snapshot(self, page: Page, status: Optional[int], error: Exception) -> None:
-        """Save the page as it came, without its schedule, to data/snapshots/<source>-<time>.html (the newest
-        SNAPSHOTS_KEPT of each source). Best effort."""
+    async def _snapshot(self, page: Page) -> None:
+        """Save the page that came without its schedule to data/snapshots/, to see what DTEK showed then."""
         if not self._state_path:
             return
         folder = os.path.join(os.path.dirname(self._state_path) or ".", "snapshots")
@@ -388,11 +336,10 @@ class DtekSite:
         try:
             html = await asyncio.wait_for(page.content(), timeout=5)
             os.makedirs(folder, exist_ok=True)
-            note = f"{page.url} status {status}: {error}".replace("--", "- -")
             with open(path, "w", encoding="utf-8") as f:
-                f.write(f"<!-- {note} -->\n{html}")
-            mine = sorted(n for n in os.listdir(folder) if n.startswith(f"{self._name}-") and n.endswith(".html"))
-            for name in mine[:-self.SNAPSHOTS_KEPT]:
+                f.write(html)
+            kept = sorted(n for n in os.listdir(folder) if n.startswith(f"{self._name}-"))
+            for name in kept[:-self.SNAPSHOTS_KEPT]:
                 os.remove(os.path.join(folder, name))
             logger.info(f"[{self._name}] page without schedule saved to {path}")
         except Exception as e:

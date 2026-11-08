@@ -161,15 +161,9 @@ tunnel. The service picks the saved cookies up on its next attempt.
   check passes: both addresses fetched within 3 minutes, Home Assistant
   connected, the delivery loop cycling. `GET /api/v1/health` lists which
   check fails, and the log says so the moment the heartbeat pauses.
-- DTEK's own site being down or overloaded (timeouts, a 5xx, a page that
-  stays blank or loading) is not a failing check, however long it lasts:
-  nothing here would fix it, and it happens for a while after many schedule
-  changes. It is only waited out. Anything else (an hCaptcha, a page we no
-  longer recognise, a 4xx, a parse or store error) alarms after 3 minutes,
-  as before. The log names which one it is (`app/dtek/client.py`
-  `SiteDown`). Every page that came without its schedule but with something
-  on it is saved as it was to `data/snapshots/<source>-<time>.html` (the
-  newest 20 of each source), to see what DTEK showed.
+  DTEK's site timing out does not count (`SiteDown`): it is only waited
+  out. A page that came without its schedule is saved to
+  `data/snapshots/` (newest 20 per source).
 
 ## Run
 
@@ -178,8 +172,8 @@ cp .env.example .env   # fill in tokens and chats
 docker compose up -d --build
 ```
 
-Health is at `GET /api/v1/health`. It returns 503 while any check above
-fails; each source also shows whether its data is fresh (`healthy`).
+Health is at `GET /api/v1/health`. It returns 503 if a source has had no
+successful fetch for 5 minutes, or if Home Assistant is disconnected.
 
 To stage next to production, set `DB_SCHEMA=dtek_staging` (separate tables
 and lock), `NOTIFY_DRY_RUN=true`, and other `*_PORT` values.
