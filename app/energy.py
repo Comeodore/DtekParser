@@ -1,8 +1,9 @@
 """Sends the home's power, as the power monitor sees the Victron's AC input, to energy.win.co.ua (ENERGY_URL).
 
 What is sent: every change of the power (with its real time, also one noticed late), the power as it is now
-every ENERGY_REPEAT_S while Home Assistant is connected, and nothing while it is not: unknown is not "off".
-The voltage itself is not sent on every change: the Victron's jitters by a volt every second or two.
+every ENERGY_REPEAT_S (60) while Home Assistant is connected, and nothing while it is not: unknown is not "off".
+The repeat keeps the site's "last record N min ago" fresh in an outage too. The voltage goes with the power on
+only, and not on its every change: the Victron's jitters by a volt every second or two.
 
 Readings wait in energy_outbox until the site takes them. A change of the power is written there in the same
 transaction as the power state, so a restart or the internet being down never loses it, and a backlog goes out
@@ -39,7 +40,7 @@ MAX_VOLTAGE = 500.0
 class EnergyConfig:
     url: str
     token: str
-    repeat_s: float = 300.0
+    repeat_s: float = 60.0
 
 
 def load_energy(env: Mapping[str, str], settings: Settings) -> Optional[EnergyConfig]:
@@ -54,7 +55,7 @@ def load_energy(env: Mapping[str, str], settings: Settings) -> Optional[EnergyCo
     if settings.power is None:
         raise ConfigError("ENERGY_URL needs the Home Assistant power monitor (HA_WS_URL)")
     try:
-        repeat = float(_get(env, "ENERGY_REPEAT_S", "300"))
+        repeat = float(_get(env, "ENERGY_REPEAT_S", "60"))
     except ValueError as e:
         raise ConfigError("ENERGY_REPEAT_S is not a number") from e
     if repeat < 30:
@@ -70,8 +71,9 @@ class EnergyReading:
 
     def payload(self) -> dict:
         body: dict = {"power": self.power}
-        # The site refuses a whole request over one voltage outside 0-500 V; the power alone still counts.
-        if self.voltage is not None and 0 <= self.voltage <= MAX_VOLTAGE:
+        # With the power off the voltage says nothing (the site lists "0 V" under the outage). The site refuses a
+        # whole request over one voltage outside 0-500 V; the power alone still counts.
+        if self.power and self.voltage is not None and 0 <= self.voltage <= MAX_VOLTAGE:
             body["voltage"] = round(self.voltage, 1)
         body["ts"] = self.at.astimezone(KYIV_TZ).isoformat(timespec="seconds")
         return body
@@ -103,7 +105,8 @@ def _seconds(header: Optional[str]) -> Optional[float]:
 
 class EnergyFeed:
     BATCH = 500             # the site's limit per request
-    MIN_GAP_S = 2.0         # 30 requests a minute
+    # The site takes 30 requests a minute; 2 s apart would be exactly that, so a little under.
+    MIN_GAP_S = 2.5
     POLL_S = 5.0
     TIMEOUT_S = 15.0
     BACKOFF_MIN_S = 5.0

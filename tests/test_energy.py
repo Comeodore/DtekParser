@@ -22,8 +22,9 @@ def test_reading_payload():
                                                          "ts": "2026-11-10T14:03:12+02:00"}
     # Kyiv's own offset whatever the stored zone, summer time too.
     summer = datetime(2026, 7, 1, 9, 0, 0, 900000, tzinfo=timezone.utc)
-    assert EnergyReading(False, 0.0, summer).payload() == {"power": False, "voltage": 0.0,
-                                                           "ts": "2026-07-01T12:00:00+03:00"}
+    assert EnergyReading(False, 0.0, summer).payload() == {"power": False, "ts": "2026-07-01T12:00:00+03:00"}
+    # No voltage with the power off, whatever is left on the input.
+    assert "voltage" not in EnergyReading(False, 31.2, at).payload()
     # A voltage the site would refuse the whole request over is left out.
     for voltage in (None, -1.0, 500.5, float("nan")):
         assert EnergyReading(True, voltage, at).payload() == {"power": True, "ts": "2026-11-10T14:03:12+02:00"}
@@ -44,7 +45,7 @@ def test_bad_energy_settings(extra, message):
 
 def test_energy_settings():
     env = {**BASE_ENV, "ENERGY_URL": "https://e.example/api/inputs/2", "ENERGY_TOKEN": "t"}
-    assert load_energy(env, load_settings(env)) == EnergyConfig("https://e.example/api/inputs/2", "t", 300.0)
+    assert load_energy(env, load_settings(env)) == EnergyConfig("https://e.example/api/inputs/2", "t", 60.0)
     assert load_energy(BASE_ENV, load_settings(BASE_ENV)) is None
     without_ha = {k: v for k, v in env.items() if not k.startswith("HA_")}
     with pytest.raises(ConfigError, match="Home Assistant"):
@@ -171,7 +172,7 @@ class Clocks:
         self.advance(seconds)
 
 
-def make_feed(url, store, clocks, current=lambda now: None, repeat_s=300.0):
+def make_feed(url, store, clocks, current=lambda now: None, repeat_s=60.0):
     return EnergyFeed(EnergyConfig(url, TOKEN, repeat_s), store, current, clock=lambda: clocks.now,
                       monotonic=lambda: clocks.mono, sleep=clocks.sleep)
 
@@ -200,7 +201,7 @@ async def test_sends_what_waits_as_one_array_with_the_token(site):
     await feed.close()
 
 
-async def test_a_backlog_goes_in_arrays_of_500_two_seconds_apart(site):
+async def test_a_backlog_goes_in_arrays_of_500_under_30_a_minute(site):
     store, clocks = MemoryStore(), Clocks()
     feed = make_feed(site.url, store, clocks)
     await queue(store, *[EnergyReading(i % 2 == 0, 230.0, kyiv(2026, 11, 9) + timedelta(minutes=5 * i))
@@ -208,7 +209,7 @@ async def test_a_backlog_goes_in_arrays_of_500_two_seconds_apart(site):
     assert await feed.flush() == 1001
     assert [len(c["body"]) for c in site.calls] == [500, 500, 1]
     assert site.calls[0]["body"][0]["ts"] == "2026-11-09T00:00:00+02:00"
-    assert clocks.slept == [2.0, 2.0]
+    assert clocks.slept == [2.5, 2.5]
     await feed.close()
 
 
@@ -270,14 +271,14 @@ async def test_repeats_the_power_now_every_interval_and_not_while_it_is_unknown(
     now_reading["value"] = True
     assert await feed.report_if_due()
     assert pending(store) == [EnergyReading(True, 230.0, clocks.now)]
-    clocks.advance(299)
+    clocks.advance(59)
     assert not await feed.report_if_due()
     clocks.advance(1)
     assert await feed.report_if_due()
     # A change queued by the power monitor counts as a reading: the repeat is a full interval after it.
-    clocks.advance(200)
+    clocks.advance(40)
     feed.noted()
-    clocks.advance(299)
+    clocks.advance(59)
     assert not await feed.report_if_due()
     assert len(pending(store)) == 2
     await feed.close()

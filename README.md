@@ -20,11 +20,13 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   as the power monitor decides it from the Victron, also goes to
   energy.win.co.ua's input (`app/energy.py`): every change at once, with its
   real time (also one noticed late, or seen by the reserve while this service
-  was away), and the power and voltage as they are now every
-  `ENERGY_REPEAT_S` (300) while Home Assistant is connected; nothing while it
-  is not, as unknown is not "off". Not on every voltage change: the Victron's
-  jitters by a volt every second or two, and the site takes at most 30
-  requests a minute (at least 2 s apart here). Readings wait in
+  was away), and the power as it is now every `ENERGY_REPEAT_S` (60) while
+  Home Assistant is connected, which keeps the site's "last record N min ago"
+  fresh in an outage too; nothing while it is not, as unknown is not "off".
+  The voltage goes with the power on only (the site lists "0 V" under an
+  outage otherwise), and not on its every change: the Victron's jitters by a
+  volt every second or two. The site takes at most 30 requests a minute
+  (2.5 s apart at least here). Readings wait in
   `energy_outbox`, a change written there in the same transaction as the power
   state, so a restart or a dead internet loses nothing; a backlog goes out
   oldest first, 500 a request. A 400 drops the readings (the reason is kept
