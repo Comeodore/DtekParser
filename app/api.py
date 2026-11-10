@@ -185,6 +185,8 @@ def create_app(service: Service) -> FastAPI:
         if request.headers.get("cf-connecting-ip"):
             raise HTTPException(404, "Not Found")
         text = exposition(service.inverter) + problem_exposition(service.failing())
+        if service.energy is not None:
+            text += service.energy.exposition()
         return PlainTextResponse(text, media_type="text/plain; version=0.0.4")
 
     @app.get("/api/v1/health")
@@ -223,7 +225,8 @@ def create_app(service: Service) -> FastAPI:
         problems = service.problems(now)
         ok = not problems
         body = {"status": "ok" if ok else "degraded", "version": APP_VERSION, "problems": problems,
-                "sources": sources, "power": power, "inverter": inverter}
+                "sources": sources, "power": power, "inverter": inverter,
+                "energy": service.energy.status() if service.energy is not None else None}
         return JSONResponse(body, status_code=200 if ok else 503)
 
     @app.post("/api/v1/wol")

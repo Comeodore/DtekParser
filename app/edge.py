@@ -29,6 +29,7 @@ from typing import Awaitable, Callable, Iterable, Mapping, Optional
 import aiohttp
 
 from app.config import SourceConfig
+from app.energy import EnergyReading
 from app.power.state import PowerState, PowerStatus
 from app.storage.store import Store
 from app.timeutil import KYIV_TZ
@@ -137,14 +138,20 @@ class Edge:
                        f"{status.name} since {since:%d.%m %H:%M:%S}")
         return PowerState(status, since)
 
-    async def take_back_power(self, store: Store, slots: Iterable[tuple[str, int]]) -> None:
+    async def take_back_power(self, store: Store, slots: Iterable[tuple[str, int]],
+                              energy_slot: Optional[int] = None) -> None:
         """On a start, before the power is watched again: each source's power (source, power_events slot) from the
-        reserve, where it watched it meanwhile, so what it has reported is not reported again."""
+        reserve, where it watched it meanwhile, so what it has reported is not reported again. A change it saw in
+        energy_slot's power is queued for energy.win with its time, as the power monitor would have."""
         for source, slot in slots:
             state = await self.claim_power(source)
             if state is None:
                 continue
             async with store.transaction() as tx:
+                if slot == energy_slot:
+                    stored = await tx.load_power_state(slot)
+                    if stored is None or stored.status != state.status:
+                        await tx.enqueue_energy([EnergyReading(state.status is PowerStatus.ON, None, state.since)])
                 await tx.save_power_state(state, slot)
 
     async def _post(self, source: str, action: str, body: dict) -> Optional[dict]:

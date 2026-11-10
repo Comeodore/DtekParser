@@ -16,6 +16,24 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   these and the krem inverter's below in its place, in the same words, going
   on from the state pushed from here; on a start this service takes back the
   state it left (edge/README.md).
+- **energy.win (kem).** With `ENERGY_URL` and `ENERGY_TOKEN` the home's power,
+  as the power monitor decides it from the Victron, also goes to
+  energy.win.co.ua's input (`app/energy.py`): every change at once, with its
+  real time (also one noticed late, or seen by the reserve while this service
+  was away), and the power and voltage as they are now every
+  `ENERGY_REPEAT_S` (300) while Home Assistant is connected; nothing while it
+  is not, as unknown is not "off". Not on every voltage change: the Victron's
+  jitters by a volt every second or two, and the site takes at most 30
+  requests a minute (at least 2 s apart here). Readings wait in
+  `energy_outbox`, a change written there in the same transaction as the power
+  state, so a restart or a dead internet loses nothing; a backlog goes out
+  oldest first, 500 a request. A 400 drops the readings (the reason is kept
+  with them); 401, 429, 5xx and network errors keep them and try again later
+  (5 s doubling to 5 min, 429's Retry-After or 60 s, 401 every 10 min).
+  Readings not taken within 7 days are dropped. Not part of the heartbeat:
+  `energy` in `/api/v1/health` and `energy_feed_*` in `/metrics` show the
+  queue. After a long outage that emptied the battery the lab is down too, so
+  the power back is sent once it boots, stamped when Home Assistant came up.
 - **Inverter (krem).** It reads the Deye inverter in Круглик from Deye Cloud
   (`device/latest`) and shows in the krem mini app where the house's power
   comes from: the house in the middle, sun, grid and battery around it, the

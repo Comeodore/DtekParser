@@ -1,6 +1,7 @@
 """Entry point: `python -m app`. One process, one socket per source port."""
 import asyncio
 import logging
+import os
 import socket
 import sys
 
@@ -8,6 +9,7 @@ import uvicorn
 
 from app.api import create_app
 from app.config import ConfigError, load_settings
+from app.energy import load_energy
 from app.service import Service
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -27,11 +29,12 @@ def _listen(port: int) -> socket.socket:
 def main() -> int:
     try:
         settings = load_settings()
+        energy = load_energy(os.environ, settings)
     except ConfigError as e:
         logger.error(f"Configuration error: {e}")
         return 2
 
-    app = create_app(Service(settings))
+    app = create_app(Service(settings, energy=energy))
     server = uvicorn.Server(uvicorn.Config(app, log_config=None, access_log=False, timeout_graceful_shutdown=15))
     ports = sorted(s.port for s in settings.sources)
     logger.info(f"Listening on ports {ports}")

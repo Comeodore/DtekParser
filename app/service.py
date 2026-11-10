@@ -13,6 +13,7 @@ from app.collector import SourceCollector, error_kind
 from app.config import Settings
 from app.dtek.client import BrowserPool, DtekSite
 from app.edge import Edge
+from app.energy import EnergyConfig, EnergyFeed
 from app.heartbeat import Heartbeat
 from app.inverter.deye import GRID_SLOT, InverterMonitor
 from app.notify.outbox import Gateway, OutboxSender, TelegramGateway
@@ -50,7 +51,8 @@ class Service:
     HEARTBEAT_EVERY_S = 30.0
     OUTBOX_STALE_S = 60.0
 
-    def __init__(self, settings: Settings, store=None, gateway: Optional[Gateway] = None):
+    def __init__(self, settings: Settings, store=None, gateway: Optional[Gateway] = None,
+                 energy: Optional[EnergyConfig] = None):
         self.settings = settings
         self.store = store if store is not None else PostgresStore(settings.database_url, settings.db_schema)
         self.router = Router(settings)
@@ -76,11 +78,17 @@ class Service:
             )
 
         self.power: Optional[PowerMonitor] = None
+        # The home's power for energy.win (ENERGY_URL); it needs the power monitor, as load_energy checks.
+        self.energy: Optional[EnergyFeed] = None
+        if energy is not None and settings.power is not None:
+            self.energy = EnergyFeed(energy, self.store,
+                                     current=lambda now: self.power.energy_reading(now) if self.power else None)
         if settings.power is not None:
             power_source = self.collectors[settings.power.source]
             self.power = PowerMonitor(
                 settings.power, self.store, self.router, snapshot=lambda: power_source.latest,
                 on_messages=self.outbox.wake,
+                energy=self.energy is not None, on_energy=self.energy.noted if self.energy else None,
             )
         # Shown in its source's mini app only; deliberately not part of problems():
         # a Deye Cloud hiccup must not pause the heartbeat.
@@ -133,7 +141,8 @@ class Service:
         await self.store.connect()
         if self.edge is not None:
             # The reserve may have watched the power meanwhile: go on from what it saw, before watching it again.
-            await self.edge.take_back_power(self.store, self.power_slots())
+            await self.edge.take_back_power(self.store, self.power_slots(),
+                                            energy_slot=POWER_SLOT if self.energy is not None else None)
         for collector in self.collectors.values():
             await collector.restore()
         if self.power is not None:
@@ -148,13 +157,16 @@ class Service:
             self._spawn("power", self.power.run)
         if self.inverter is not None:
             self._spawn("inverter", self.inverter.run)
+        if self.energy is not None:
+            self._spawn("energy", self.energy.run)
         self._spawn("heartbeat", self._heartbeat)
         if isinstance(self.store, PostgresStore):
             self._spawn("instance-lock", self._watch_lock)
         inverter = f"deye→{self.inverter.source}" if self.inverter else "off"
         logger.info(f"Service started: sources={list(self.collectors)}, power={'on' if self.power else 'off'}, "
                     f"inverter={inverter}, reserve={self.reserve.url or 'off'}, "
-                    f"edge={self.edge.url if self.edge else 'off'}, dry_run={self.settings.dry_run}")
+                    f"edge={self.edge.url if self.edge else 'off'}, energy={'on' if self.energy else 'off'}, "
+                    f"dry_run={self.settings.dry_run}")
 
     def failing(self, now: Optional[datetime] = None) -> list[tuple[str, str, str]]:
         """Each check that keeps the service from working fully, as (check, reason, latest error). The reason stays
@@ -225,5 +237,7 @@ class Service:
             await self.gateway.close()
         if self.edge is not None:
             await self.edge.close()
+        if self.energy is not None:
+            await self.energy.close()
         await self.store.close()
         logger.info("Service stopped")

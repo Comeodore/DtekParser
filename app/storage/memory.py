@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import AsyncIterator, Optional, Sequence
 
+from app.energy import EnergyReading
 from app.notify.router import OutgoingMessage
 from app.power.state import PowerState
 from app.storage.store import OutboxItem, SourceState
@@ -21,6 +22,8 @@ class _Data:
     power_slots: dict[int, PowerState] = field(default_factory=dict)
     outbox: dict[int, dict] = field(default_factory=dict)
     next_id: int = 1
+    energy: dict[int, dict] = field(default_factory=dict)
+    next_energy_id: int = 1
 
 
 class MemoryTx:
@@ -53,6 +56,14 @@ class MemoryTx:
                 "sent_at": None, "failed_at": None, "error": None,
             }
             self.data.next_id += 1
+
+    async def enqueue_energy(self, readings: Sequence[EnergyReading]) -> None:
+        now = datetime.now(timezone.utc)
+        for r in readings:
+            self.data.energy[self.data.next_energy_id] = {
+                "reading": r, "created_at": now, "sent_at": None, "failed_at": None, "error": None,
+            }
+            self.data.next_energy_id += 1
 
 
 class MemoryStore:
@@ -105,10 +116,42 @@ class MemoryStore:
             del self.data.outbox[i]
         return len(doomed)
 
+    def _energy_pending(self) -> list[int]:
+        return sorted(i for i, r in self.data.energy.items() if r["sent_at"] is None and r["failed_at"] is None)
+
+    async def pending_energy(self, limit: int) -> list[tuple[int, EnergyReading]]:
+        return [(i, self.data.energy[i]["reading"]) for i in self._energy_pending()[:limit]]
+
+    async def count_pending_energy(self) -> int:
+        return len(self._energy_pending())
+
+    async def mark_energy_sent(self, ids: Sequence[int], at: datetime) -> None:
+        for i in ids:
+            self.data.energy[i].update(sent_at=at, error=None)
+
+    async def mark_energy_failed(self, ids: Sequence[int], error: str, at: datetime) -> None:
+        for i in ids:
+            self.data.energy[i].update(failed_at=at, error=error)
+
+    async def expire_energy(self, queued_before: datetime, at: datetime) -> int:
+        doomed = [i for i in self._energy_pending() if self.data.energy[i]["created_at"] < queued_before]
+        await self.mark_energy_failed(doomed, "expired", at)
+        return len(doomed)
+
+    async def purge_energy(self, before: datetime) -> int:
+        doomed = [i for i, r in self.data.energy.items()
+                  if (r["sent_at"] and r["sent_at"] < before) or (r["failed_at"] and r["failed_at"] < before)]
+        for i in doomed:
+            del self.data.energy[i]
+        return len(doomed)
+
     # helpers for tests
     def sent_texts(self, chat_id: Optional[str] = None) -> list[str]:
         return [r["item"].text for r in sorted(self.data.outbox.values(), key=lambda r: r["item"].id)
                 if r["sent_at"] and (chat_id is None or r["item"].chat_id == chat_id)]
+
+    def energy_rows(self) -> list[dict]:
+        return [self.data.energy[i] for i in sorted(self.data.energy)]
 
     def queued(self) -> list[OutboxItem]:
         return [r["item"] for r in sorted(self.data.outbox.values(), key=lambda r: r["item"].id)]

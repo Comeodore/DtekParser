@@ -11,6 +11,7 @@ from typing import AsyncIterator, Optional, Sequence
 
 import asyncpg
 
+from app.energy import EnergyReading
 from app.notify.router import OutgoingMessage
 from app.power.state import PowerState, PowerStatus
 from app.storage.store import OutboxItem, SourceState
@@ -73,6 +74,18 @@ ALTER TABLE notification_outbox ALTER COLUMN next_attempt_at DROP NOT NULL;
 ALTER TABLE notification_outbox ALTER COLUMN next_attempt_at DROP DEFAULT;
 CREATE INDEX IF NOT EXISTS notification_outbox_pending
     ON notification_outbox (id) WHERE sent_at IS NULL AND failed_at IS NULL;
+CREATE TABLE IF NOT EXISTS energy_outbox (
+    id bigserial PRIMARY KEY,
+    power boolean NOT NULL,
+    voltage double precision,
+    measured_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    sent_at timestamptz,
+    failed_at timestamptz,
+    last_error text
+);
+CREATE INDEX IF NOT EXISTS energy_outbox_pending
+    ON energy_outbox (id) WHERE sent_at IS NULL AND failed_at IS NULL;
 """
 
 
@@ -152,6 +165,14 @@ class PgTx:
         await self._conn.executemany(
             "INSERT INTO notification_outbox (bot, chat_id, text, expires_at) VALUES ($1, $2, $3, $4)",
             [(m.bot, m.chat_id, m.text, m.expires_at) for m in messages],
+        )
+
+    async def enqueue_energy(self, readings: Sequence[EnergyReading]) -> None:
+        if not readings:
+            return
+        await self._conn.executemany(
+            "INSERT INTO energy_outbox (power, voltage, measured_at) VALUES ($1, $2, $3)",
+            [(r.power, r.voltage, r.at) for r in readings],
         )
 
 
@@ -310,6 +331,48 @@ class PostgresStore:
         status = await self._pool.execute(
             "DELETE FROM notification_outbox WHERE sent_at < $1 OR failed_at < $1", before
         )
+        return int(status.split()[-1])
+
+    async def pending_energy(self, limit: int) -> list[tuple[int, EnergyReading]]:
+        assert self._pool is not None
+        rows = await self._pool.fetch(
+            "SELECT id, power, voltage, measured_at FROM energy_outbox"
+            " WHERE sent_at IS NULL AND failed_at IS NULL ORDER BY id LIMIT $1",
+            limit,
+        )
+        return [(r["id"], EnergyReading(r["power"], r["voltage"], r["measured_at"])) for r in rows]
+
+    async def count_pending_energy(self) -> int:
+        assert self._pool is not None
+        return await self._pool.fetchval(
+            "SELECT count(*) FROM energy_outbox WHERE sent_at IS NULL AND failed_at IS NULL"
+        )
+
+    async def mark_energy_sent(self, ids: Sequence[int], at: datetime) -> None:
+        assert self._pool is not None
+        await self._pool.execute(
+            "UPDATE energy_outbox SET sent_at = $2, last_error = NULL WHERE id = ANY($1::bigint[])", list(ids), at
+        )
+
+    async def mark_energy_failed(self, ids: Sequence[int], error: str, at: datetime) -> None:
+        assert self._pool is not None
+        await self._pool.execute(
+            "UPDATE energy_outbox SET failed_at = $2, last_error = $3 WHERE id = ANY($1::bigint[])",
+            list(ids), at, error[:1000],
+        )
+
+    async def expire_energy(self, queued_before: datetime, at: datetime) -> int:
+        assert self._pool is not None
+        status = await self._pool.execute(
+            "UPDATE energy_outbox SET failed_at = $2, last_error = 'expired'"
+            " WHERE sent_at IS NULL AND failed_at IS NULL AND created_at < $1",
+            queued_before, at,
+        )
+        return int(status.split()[-1])
+
+    async def purge_energy(self, before: datetime) -> int:
+        assert self._pool is not None
+        status = await self._pool.execute("DELETE FROM energy_outbox WHERE sent_at < $1 OR failed_at < $1", before)
         return int(status.split()[-1])
 
     async def close(self) -> None:

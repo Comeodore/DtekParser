@@ -16,6 +16,7 @@ import aiohttp
 
 from app.config import PowerConfig
 from app.dtek.models import Snapshot
+from app.energy import EnergyReading
 from app.notify.router import Router
 from app.power.state import PowerState, PowerStatus, next_state, parse_battery, parse_number, parse_voltage
 from app.power.verdict import Actual
@@ -49,6 +50,8 @@ class PowerMonitor:
         snapshot: Callable[[], Optional[Snapshot]],
         clock: Callable[[], datetime] = now_kyiv,
         on_messages: Optional[Callable[[], None]] = None,
+        energy: bool = False,
+        on_energy: Optional[Callable[[], None]] = None,
     ):
         self._config = config
         self._store = store
@@ -56,11 +59,16 @@ class PowerMonitor:
         self._snapshot = snapshot
         self._clock = clock
         self._on_messages = on_messages
+        # Queue each change of the power for energy.win (app/energy.py) with the power state, and say so.
+        self._energy = energy
+        self._on_energy = on_energy
         self._state: Optional[PowerState] = None
         self._battery = "N/A"
         # For the mini app's batteries row; HA pushes every change, so these are live.
         self.battery_soc: Optional[float] = None
         self.battery_w: Optional[float] = None
+        # The AC input's last reading; None while HA is away, as it may have changed meanwhile.
+        self.voltage: Optional[float] = None
         self.connected = False
         self._lost_at: Optional[datetime] = None
         self._warned_unavailable = False
@@ -87,6 +95,13 @@ class PowerMonitor:
         if not self.connected and (self._lost_at is None or now - self._lost_at > self.LIVE_GRACE):
             return None
         return Actual(state.status is PowerStatus.ON, state.since, "home_assistant")
+
+    def energy_reading(self, now: datetime) -> Optional[EnergyReading]:
+        """The power as it is now, for energy.win's repeat; None unless HA is connected and has a reading."""
+        state = self._state
+        if state is None or not self.connected or self._warned_unavailable or self.voltage is None:
+            return None
+        return EnergyReading(state.status is PowerStatus.ON, self.voltage, now)
 
     def battery_payload(self) -> Optional[dict]:
         if self.battery_soc is None:
@@ -119,6 +134,7 @@ class PowerMonitor:
         if self.connected:
             self._lost_at = self._clock()
         self.connected = False
+        self.voltage = None
 
     async def _session(self) -> None:
         timeout = aiohttp.ClientTimeout(total=None, connect=20, sock_read=None)
@@ -182,6 +198,7 @@ class PowerMonitor:
         if entity == self._config.battery_power_entity:
             self.battery_w = parse_number(value)
             return
+        self.voltage = parse_number(value)
         status = parse_voltage(value, self._config.min_voltage)
         if status is None:
             if not self._warned_unavailable:
@@ -199,11 +216,16 @@ class PowerMonitor:
         async with self._store.transaction() as tx:
             stored = await tx.load_power_state()
             state, transition = next_state(stored, status, changed_at, now, self._battery, from_snapshot)
-            if state != stored:
+            changed = state != stored
+            if changed:
                 await tx.save_power_state(state)
+                if self._energy:
+                    await tx.enqueue_energy([EnergyReading(state.status is PowerStatus.ON, self.voltage, state.since)])
             messages = self._router.for_power(transition, self._snapshot(), now) if transition else []
             await tx.enqueue(messages)
         self._state = state
+        if changed and self._energy and self._on_energy:
+            self._on_energy()
         if transition is None:
             logger.info(f"Power state initialised: {state.status.name}")
             return
