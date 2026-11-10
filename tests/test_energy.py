@@ -198,7 +198,7 @@ async def test_sends_what_waits_as_one_array_with_the_token(site):
     assert await feed.flush() == 2
     assert site.calls == [{"auth": f"Bearer {TOKEN}", "body": [ON.payload(), OFF.payload()]}]
     assert pending(store) == [] and feed.sent == 2 and feed.last_success == clocks.now
-    assert feed.last_taken == OFF
+    assert feed.requests["ok"] == 1 and feed.request_s is not None
     assert await feed.flush() == 0 and len(site.calls) == 1
     await feed.close()
 
@@ -223,19 +223,21 @@ async def test_refused_readings_are_dropped_with_the_reason(site):
     assert await feed.flush() == 0
     assert pending(store) == [] and store.energy_rows()[0]["error"] == "Поле power обов’язкове"
     assert feed.rejected == 1 and feed.last_error == "HTTP 400: Поле power обов’язкове"
+    assert feed.requests["refused"] == 1
     # Not a reason to stop: what comes next goes out.
     await queue(store, OFF)
     assert await feed.flush() == 1 and feed.last_error is None
     await feed.close()
 
 
-@pytest.mark.parametrize("reply, wait", [
-    ((503, {"message": "down"}, {}), 5.0),
-    ((429, None, {"Retry-After": "42"}), 42.0),
-    ((429, None, {}), 60.0),
-    ((401, None, {}), 600.0),
+@pytest.mark.parametrize("reply, wait, result", [
+    ((503, {"message": "down"}, {}), 5.0, "site_error"),
+    ((404, None, {}), 5.0, "site_error"),
+    ((429, None, {"Retry-After": "42"}), 42.0, "rate_limited"),
+    ((429, None, {}), 60.0, "rate_limited"),
+    ((401, None, {}), 600.0, "unauthorized"),
 ])
-async def test_a_failure_keeps_the_readings_until_it_is_time_to_try_again(site, reply, wait):
+async def test_a_failure_keeps_the_readings_until_it_is_time_to_try_again(site, reply, wait, result):
     store, clocks = MemoryStore(), Clocks()
     feed = make_feed(site.url, store, clocks)
     await queue(store, ON)
@@ -247,6 +249,7 @@ async def test_a_failure_keeps_the_readings_until_it_is_time_to_try_again(site, 
     clocks.advance(1)
     assert await feed.flush() == 1 and pending(store) == []
     assert feed.status()["retry_in_s"] is None and feed.last_error is None
+    assert {r: n for r, n in feed.requests.items() if n} == {result: 1, "ok": 1}
     await feed.close()
 
 
@@ -261,6 +264,7 @@ async def test_an_unreachable_site_backs_off_up_to_five_minutes():
         clocks.advance(waits[-1])
     assert waits == [5, 10, 20, 40, 80, 160, 300, 300]
     assert pending(store) == [ON] and feed.last_error.startswith("ClientConnectorError")
+    assert {r: n for r, n in feed.requests.items() if n} == {"no_connection": 8}
     await feed.close()
 
 
@@ -307,14 +311,14 @@ def test_metrics_and_health_show_the_queue():
     assert f"energy_feed_last_success_timestamp_seconds {kyiv(2026, 11, 10, 12).timestamp()}" in text
     assert TOKEN not in text and TOKEN not in str(feed.status())
     assert feed.status()["pending"] == 3
-    assert "energy_feed_power" not in text
-    # The newest reading the site took, stamped with when it was measured.
-    feed.last_taken = EnergyReading(True, 231.4, kyiv(2026, 11, 10, 11, 59, 30))
-    ms = int(kyiv(2026, 11, 10, 11, 59, 30).timestamp() * 1000)
+    # Every result is there from the start, at 0.
+    assert 'energy_feed_requests_total{result="ok"} 0\n' in text
+    assert 'energy_feed_requests_total{result="no_connection"} 0\n' in text
+    assert "energy_feed_request_duration_seconds" not in text
+    feed.requests["site_error"], feed.request_s = 2, 0.18342
     text = feed.exposition()
-    assert f"energy_feed_power 1 {ms}\n" in text and f"energy_feed_voltage_volts 231.4 {ms}\n" in text
-    feed.last_taken = EnergyReading(False, None, kyiv(2026, 11, 10, 12, 0))
-    assert "energy_feed_power 0 " in feed.exposition() and "energy_feed_voltage_volts" not in feed.exposition()
+    assert 'energy_feed_requests_total{result="site_error"} 2\n' in text
+    assert "energy_feed_request_duration_seconds 0.1834\n" in text
 
 
 # ---- what the reserve saw while the service was away ----

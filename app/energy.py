@@ -95,6 +95,14 @@ def _message(text: str) -> str:
         return text[:300]
 
 
+# How a request to the site ended, for energy_feed_requests_total; site_error is any other answer (5xx, 404, ...).
+RESULTS = ("ok", "refused", "unauthorized", "rate_limited", "site_error", "no_connection")
+
+
+def _result(status: int) -> str:
+    return {200: "ok", 400: "refused", 401: "unauthorized", 429: "rate_limited"}.get(status, "site_error")
+
+
 def _seconds(header: Optional[str]) -> Optional[float]:
     try:
         return max(float(header), 1.0) if header else None
@@ -145,8 +153,8 @@ class EnergyFeed:
         self.pending: Optional[int] = None
         self.last_success: Optional[datetime] = None
         self.last_error: Optional[str] = None
-        # The newest reading the site took: what it shows now.
-        self.last_taken: Optional[EnergyReading] = None
+        self.requests = dict.fromkeys(RESULTS, 0)
+        self.request_s: Optional[float] = None     # how long the last request took, answered or not
 
     def noted(self) -> None:
         """A change of the power was queued (by the power monitor): send it now, repeat a full interval later."""
@@ -218,9 +226,6 @@ class EnergyFeed:
             self.sent += len(ids)
             taken += len(ids)
             self.last_success = self._clock()
-            newest = max((r for _, r in batch), key=lambda r: r.at)
-            if self.last_taken is None or newest.at >= self.last_taken.at:
-                self.last_taken = newest
             if len(ids) > 1:
                 logger.info(f"energy.win took {len(ids)} readings that had waited")
         return taken
@@ -236,12 +241,15 @@ class EnergyFeed:
         """The number of readings the site says it took."""
         if self._session is None:
             self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=self.TIMEOUT_S))
+        started = self._monotonic()
         try:
             async with self._session.post(self._config.url, json=body,
                                           headers={"Authorization": f"Bearer {self._config.token}"}) as r:
                 status, text, retry_after = r.status, await r.text(), r.headers.get("Retry-After")
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            self._ended("no_connection", started)
             raise RetryLater(f"{type(e).__name__}: {e}" if str(e) else type(e).__name__) from e
+        self._ended(_result(status), started)
         if status == 200:
             try:
                 received = json.loads(text).get("received")
@@ -255,6 +263,10 @@ class EnergyFeed:
         if status == 429:
             raise RetryLater("HTTP 429: too many requests", _seconds(retry_after) or self.RATE_LIMITED_S)
         raise RetryLater(f"HTTP {status}: {_message(text)}")
+
+    def _ended(self, result: str, started: float) -> None:
+        self.requests[result] += 1
+        self.request_s = self._monotonic() - started
 
     async def _purge_if_due(self) -> None:
         now = self._clock()
@@ -286,25 +298,20 @@ class EnergyFeed:
         for name, help_, value in (
             ("energy_feed_sent_total", "Readings energy.win took since the start", self.sent),
             ("energy_feed_rejected_total", "Readings energy.win refused (HTTP 400), dropped", self.rejected),
-            ("energy_feed_failures_total", "Requests to energy.win that failed and are retried", self.failures),
         ):
             lines += [f"# HELP {name} {help_}", f"# TYPE {name} counter", f"{name} {value}"]
+        # Every result from the start, at 0 too, so a first failure counts in increase().
+        lines += ["# HELP energy_feed_requests_total Requests to energy.win since the start, by how they ended",
+                  "# TYPE energy_feed_requests_total counter"]
+        lines += [f'energy_feed_requests_total{{result="{r}"}} {n}' for r, n in self.requests.items()]
+        if self.request_s is not None:
+            lines += ["# HELP energy_feed_request_duration_seconds How long the last request to energy.win took",
+                      "# TYPE energy_feed_request_duration_seconds gauge",
+                      f"energy_feed_request_duration_seconds {round(self.request_s, 4)}"]
         if self.last_success is not None:
             lines += ["# HELP energy_feed_last_success_timestamp_seconds When energy.win last took readings",
                       "# TYPE energy_feed_last_success_timestamp_seconds gauge",
                       f"energy_feed_last_success_timestamp_seconds {self.last_success.timestamp()}"]
-        reading = self.last_taken
-        if reading is not None:
-            # Stamped with the time it was measured, as the Deye readings are: a scrape with honor_timestamps
-            # stores one point per reading, and when no new one is taken the series stop rather than repeat.
-            ms = int(reading.at.timestamp() * 1000)
-            lines += ["# HELP energy_feed_power 1 while the newest reading energy.win took says the power is there",
-                      "# TYPE energy_feed_power gauge",
-                      f"energy_feed_power {1 if reading.power else 0} {ms}"]
-            if reading.voltage is not None:
-                lines += ["# HELP energy_feed_voltage_volts The AC input voltage in the newest reading energy.win took",
-                          "# TYPE energy_feed_voltage_volts gauge",
-                          f"energy_feed_voltage_volts {reading.voltage!r} {ms}"]
         return "\n".join(lines) + "\n"
 
     async def close(self) -> None:

@@ -33,9 +33,9 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   (5 s doubling to 5 min, 429's Retry-After or 60 s, 401 every 10 min).
   Readings not taken within 7 days are dropped. Not part of the heartbeat:
   `energy` in `/api/v1/health` and `energy_feed_*` in `/metrics` show the
-  queue and the newest reading the site took (`energy_feed_power`,
-  `energy_feed_voltage_volts`, stamped with when it was measured), drawn in
-  Grafana's "energy.win · Victron input" dashboard. After a long outage that emptied the battery the lab is down too, so
+  queue, the requests by how they ended (`energy_feed_requests_total{result}`)
+  and how long the last one took, drawn in Grafana's "energy.win · feed"
+  dashboard. After a long outage that emptied the battery the lab is down too, so
   the power back is sent once it boots, stamped when Home Assistant came up.
 - **Inverter (krem).** It reads the Deye inverter in Круглик from Deye Cloud
   (`device/latest`) and shows in the krem mini app where the house's power
