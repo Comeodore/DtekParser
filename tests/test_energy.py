@@ -22,9 +22,10 @@ def test_reading_payload():
                                                          "ts": "2026-11-10T14:03:12+02:00"}
     # Kyiv's own offset whatever the stored zone, summer time too.
     summer = datetime(2026, 7, 1, 9, 0, 0, 900000, tzinfo=timezone.utc)
-    assert EnergyReading(False, 0.0, summer).payload() == {"power": False, "ts": "2026-07-01T12:00:00+03:00"}
-    # No voltage with the power off, whatever is left on the input.
-    assert "voltage" not in EnergyReading(False, 31.2, at).payload()
+    assert EnergyReading(False, 0.0, summer).payload() == {"power": False, "voltage": 0.0,
+                                                           "ts": "2026-07-01T12:00:00+03:00"}
+    # The voltage goes with the power off too, whatever is left on the input.
+    assert EnergyReading(False, 31.24, at).payload()["voltage"] == 31.2
     # A voltage the site would refuse the whole request over is left out.
     for voltage in (None, -1.0, 500.5, float("nan")):
         assert EnergyReading(True, voltage, at).payload() == {"power": True, "ts": "2026-11-10T14:03:12+02:00"}

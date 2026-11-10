@@ -23,9 +23,8 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   was away), and the power as it is now every `ENERGY_REPEAT_S` (60) while
   Home Assistant is connected, which keeps the site's "last record N min ago"
   fresh in an outage too; nothing while it is not, as unknown is not "off".
-  The voltage goes with the power on only (the site lists "0 V" under an
-  outage otherwise), and not on its every change: the Victron's jitters by a
-  volt every second or two. The site takes at most 30 requests a minute
+  The voltage goes with every reading (0 V in an outage), but not on its
+  every change: the Victron's jitters by a volt every second or two. The site takes at most 30 requests a minute
   (2.5 s apart at least here). Readings wait in
   `energy_outbox`, a change written there in the same transaction as the power
   state, so a restart or a dead internet loses nothing; a backlog goes out

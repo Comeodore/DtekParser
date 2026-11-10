@@ -2,8 +2,8 @@
 
 What is sent: every change of the power (with its real time, also one noticed late), the power as it is now
 every ENERGY_REPEAT_S (60) while Home Assistant is connected, and nothing while it is not: unknown is not "off".
-The repeat keeps the site's "last record N min ago" fresh in an outage too. The voltage goes with the power on
-only, and not on its every change: the Victron's jitters by a volt every second or two.
+The repeat keeps the site's "last record N min ago" fresh in an outage too. The voltage goes with every reading
+(0 V in an outage), but not on its every change: the Victron's jitters by a volt every second or two.
 
 Readings wait in energy_outbox until the site takes them. A change of the power is written there in the same
 transaction as the power state, so a restart or the internet being down never loses it, and a backlog goes out
@@ -71,9 +71,8 @@ class EnergyReading:
 
     def payload(self) -> dict:
         body: dict = {"power": self.power}
-        # With the power off the voltage says nothing (the site lists "0 V" under the outage). The site refuses a
-        # whole request over one voltage outside 0-500 V; the power alone still counts.
-        if self.power and self.voltage is not None and 0 <= self.voltage <= MAX_VOLTAGE:
+        # The site refuses a whole request over one voltage outside 0-500 V; the power alone still counts.
+        if self.voltage is not None and 0 <= self.voltage <= MAX_VOLTAGE:
             body["voltage"] = round(self.voltage, 1)
         body["ts"] = self.at.astimezone(KYIV_TZ).isoformat(timespec="seconds")
         return body
