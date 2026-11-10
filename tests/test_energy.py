@@ -197,6 +197,7 @@ async def test_sends_what_waits_as_one_array_with_the_token(site):
     assert await feed.flush() == 2
     assert site.calls == [{"auth": f"Bearer {TOKEN}", "body": [ON.payload(), OFF.payload()]}]
     assert pending(store) == [] and feed.sent == 2 and feed.last_success == clocks.now
+    assert feed.last_taken == OFF
     assert await feed.flush() == 0 and len(site.calls) == 1
     await feed.close()
 
@@ -305,6 +306,14 @@ def test_metrics_and_health_show_the_queue():
     assert f"energy_feed_last_success_timestamp_seconds {kyiv(2026, 11, 10, 12).timestamp()}" in text
     assert TOKEN not in text and TOKEN not in str(feed.status())
     assert feed.status()["pending"] == 3
+    assert "energy_feed_power" not in text
+    # The newest reading the site took, stamped with when it was measured.
+    feed.last_taken = EnergyReading(True, 231.4, kyiv(2026, 11, 10, 11, 59, 30))
+    ms = int(kyiv(2026, 11, 10, 11, 59, 30).timestamp() * 1000)
+    text = feed.exposition()
+    assert f"energy_feed_power 1 {ms}\n" in text and f"energy_feed_voltage_volts 231.4 {ms}\n" in text
+    feed.last_taken = EnergyReading(False, None, kyiv(2026, 11, 10, 12, 0))
+    assert "energy_feed_power 0 " in feed.exposition() and "energy_feed_voltage_volts" not in feed.exposition()
 
 
 # ---- what the reserve saw while the service was away ----

@@ -146,6 +146,8 @@ class EnergyFeed:
         self.pending: Optional[int] = None
         self.last_success: Optional[datetime] = None
         self.last_error: Optional[str] = None
+        # The newest reading the site took: what it shows now.
+        self.last_taken: Optional[EnergyReading] = None
 
     def noted(self) -> None:
         """A change of the power was queued (by the power monitor): send it now, repeat a full interval later."""
@@ -217,6 +219,9 @@ class EnergyFeed:
             self.sent += len(ids)
             taken += len(ids)
             self.last_success = self._clock()
+            newest = max((r for _, r in batch), key=lambda r: r.at)
+            if self.last_taken is None or newest.at >= self.last_taken.at:
+                self.last_taken = newest
             if len(ids) > 1:
                 logger.info(f"energy.win took {len(ids)} readings that had waited")
         return taken
@@ -289,6 +294,18 @@ class EnergyFeed:
             lines += ["# HELP energy_feed_last_success_timestamp_seconds When energy.win last took readings",
                       "# TYPE energy_feed_last_success_timestamp_seconds gauge",
                       f"energy_feed_last_success_timestamp_seconds {self.last_success.timestamp()}"]
+        reading = self.last_taken
+        if reading is not None:
+            # Stamped with the time it was measured, as the Deye readings are: a scrape with honor_timestamps
+            # stores one point per reading, and when no new one is taken the series stop rather than repeat.
+            ms = int(reading.at.timestamp() * 1000)
+            lines += ["# HELP energy_feed_power 1 while the newest reading energy.win took says the power is there",
+                      "# TYPE energy_feed_power gauge",
+                      f"energy_feed_power {1 if reading.power else 0} {ms}"]
+            if reading.voltage is not None:
+                lines += ["# HELP energy_feed_voltage_volts The AC input voltage in the newest reading energy.win took",
+                          "# TYPE energy_feed_voltage_volts gauge",
+                          f"energy_feed_voltage_volts {reading.voltage!r} {ms}"]
         return "\n".join(lines) + "\n"
 
     async def close(self) -> None:
