@@ -16,10 +16,8 @@ def minute_of_day(moment: datetime) -> int:
 
 
 def hhmm(minute: int) -> str:
-    """Minute of day as HH:MM; the end of the day stays 24:00 so periods read naturally."""
-    if minute >= MINUTES_IN_DAY:
-        return "24:00"
-    h, m = divmod(minute, 60)
+    """Minute of day as HH:MM; the day's end (1440) reads 00:00, not 24:00."""
+    h, m = divmod(minute % MINUTES_IN_DAY, 60)
     return f"{h:02d}:{m:02d}"
 
 

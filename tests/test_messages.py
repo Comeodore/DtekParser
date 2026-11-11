@@ -103,6 +103,20 @@ def test_power_outage_within_schedule():
                     "⚡ Scheduled\n🕐 Restoration: <b>19:00</b>")
 
 
+def test_midnight_reads_00_00_not_24_00():
+    today = one(OCT1, [22, 23])
+    snap = snapshot([today])
+    transition = PowerTransition(PowerStatus.OFF, kyiv(2026, 10, 1, 22, 15), kyiv(2026, 10, 1, 15, 4), "100%", False)
+    assert render_power(transition, snap, kyiv(2026, 10, 1, 22, 15), "en").endswith(
+        "⚡ Scheduled\n🕐 Restoration: <b>00:00</b>")
+    assert render_power(transition, snap, kyiv(2026, 10, 1, 22, 15), "uk").endswith(
+        "⚡ За графіком, відновлення о <b>00:00</b>")
+    text = render_schedule(ScheduleEvent(OCT1, ScheduleChange.CHANGED, today, None), snap, kyiv(2026, 10, 1, 20), "en")
+    assert text.endswith("🔴 22:00 – 00:00")
+    tomorrow = snapshot([one(OCT1), one(OCT2, [20, 21, 22, 23])])
+    assert next_outage_text(tomorrow, kyiv(2026, 10, 1, 12), "en") == "tomorrow 20:00 – 00:00"
+
+
 def test_power_outage_outside_schedule_with_dtek_notice():
     snap = snapshot([one(OCT1, [16])], outage=emergency())
     transition = PowerTransition(PowerStatus.OFF, kyiv(2026, 10, 1, 11, 3), kyiv(2026, 10, 1, 9), "98%", True)
