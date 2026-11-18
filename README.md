@@ -12,6 +12,10 @@ tells Telegram about it. It replaces four containers: `dtek-parser-kem`,
   krem → `@dtek_parser_bot` (Ukrainian).
 - **Power.** It watches the Victron AC-input voltage in Home Assistant and
   reports outages and restores to the kem chats, with schedule context.
+  0 V is an outage only once the AC input (`HA_INPUT_SOURCE_ENTITY`) reads
+  NOT_CONNECTED; while it reads UNKNOWN the GX has no data from the inverter
+  (a Remote VEConfigure download or upload, a GX restart) and the 0 V is
+  ignored.
   While this service is away, the reserve on Cloudflare (`EDGE_URL`) sends
   these and the krem inverter's below in its place, in the same words, going
   on from the state pushed from here; on a start this service takes back the

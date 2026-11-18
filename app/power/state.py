@@ -40,6 +40,12 @@ class PowerTransition:
 # A change HA reports this long after it happened is shown with its own time.
 LATE_THRESHOLD = timedelta(seconds=90)
 
+# The inverter's AC input (Venus /Ac/ActiveIn/Source) as the HA `victron` integration names it. In an outage the
+# voltage drops to 0 and the input reads NOT_CONNECTED 0-2 s later. While the GX has no data from the inverter (a
+# Remote VEConfigure download or upload, a GX restart) the voltage reads 0 as well, but the input reads UNKNOWN.
+INPUT_NOT_CONNECTED = "NOT_CONNECTED"
+INPUT_UNKNOWN = "UNKNOWN"
+
 
 def parse_voltage(raw: object, min_voltage: float) -> Optional[PowerStatus]:
     """None when the sensor has no usable value (HA restarting, integration down)."""

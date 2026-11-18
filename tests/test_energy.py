@@ -86,6 +86,9 @@ async def test_a_change_of_the_power_is_queued_with_its_time_and_voltage(monitor
 
     went_off = kyiv(2026, 10, 1, 16, 0, 30)
     await change(mon, "0.0", went_off)
+    assert store.energy_rows() == []        # until the input says NOT_CONNECTED
+    await mon._handle({"id": 1, "type": "event", "event": {"c": {
+        mon._config.input_source_entity: {"+": {"s": "NOT_CONNECTED"}}}}})
     assert [r["reading"] for r in store.energy_rows()] == [EnergyReading(False, 0.0, went_off)]
     assert noted == [clock["now"]]
     # In the same transaction as the power state and the messages: a failed commit leaves none of them.
@@ -99,7 +102,8 @@ async def test_the_first_reading_ever_is_queued_too(monitor):
     mon, store, _, noted = monitor
     await mon.restore()
     await mon._handle({"id": 1, "type": "event", "event": {"a": {
-        mon._config.voltage_entity: {"s": "0.0", "lc": kyiv(2026, 10, 1, 9).timestamp()}}}})
+        mon._config.voltage_entity: {"s": "0.0", "lc": kyiv(2026, 10, 1, 9).timestamp()},
+        mon._config.input_source_entity: {"s": "NOT_CONNECTED", "lc": kyiv(2026, 10, 1, 9).timestamp()}}}})
     assert [r["reading"] for r in store.energy_rows()] == [EnergyReading(False, 0.0, kyiv(2026, 10, 1, 9))]
     assert store.queued() == [] and len(noted) == 1
 

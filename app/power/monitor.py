@@ -18,7 +18,8 @@ from app.config import PowerConfig
 from app.dtek.models import Snapshot
 from app.energy import EnergyReading
 from app.notify.router import Router
-from app.power.state import PowerState, PowerStatus, next_state, parse_battery, parse_number, parse_voltage
+from app.power.state import (INPUT_NOT_CONNECTED, INPUT_UNKNOWN, PowerState, PowerStatus, next_state, parse_battery,
+                             parse_number, parse_voltage)
 from app.power.verdict import Actual
 from app.storage.store import Store
 from app.timeutil import KYIV_TZ, now_kyiv
@@ -41,6 +42,9 @@ class PowerMonitor:
     PING_INTERVAL_S = 30.0
     # HA drops the websocket now and then and is back within seconds; the state holds that long meanwhile.
     LIVE_GRACE = timedelta(minutes=2)
+    # 0 V with the input reading neither NOT_CONNECTED nor UNKNOWN (its sensor missing or late) is taken as an outage
+    # after this long. A real outage brought NOT_CONNECTED within 2 s (16-17.11.2026).
+    CONFIRM_S = 30.0
 
     def __init__(
         self,
@@ -72,6 +76,11 @@ class PowerMonitor:
         self.connected = False
         self._lost_at: Optional[datetime] = None
         self._warned_unavailable = False
+        self._input_source: Optional[str] = None
+        # A 0 V reading waiting for the input source to tell an outage from a GX without data:
+        # (its last_changed, whether it came in a snapshot), and the fallback that decides it after CONFIRM_S.
+        self._low: Optional[tuple[datetime, bool]] = None
+        self._confirm: Optional[asyncio.Task] = None
 
     @property
     def state(self) -> Optional[PowerState]:
@@ -97,9 +106,9 @@ class PowerMonitor:
         return Actual(state.status is PowerStatus.ON, state.since, "home_assistant")
 
     def energy_reading(self, now: datetime) -> Optional[EnergyReading]:
-        """The power as it is now, for energy.win's repeat; None unless HA is connected and has a reading."""
+        """The power as it is now, for energy.win's repeat; None unless HA is connected and has a decided reading."""
         state = self._state
-        if state is None or not self.connected or self._warned_unavailable or self.voltage is None:
+        if state is None or not self.connected or self._warned_unavailable or self.voltage is None or self._low:
             return None
         return EnergyReading(state.status is PowerStatus.ON, self.voltage, now)
 
@@ -135,6 +144,8 @@ class PowerMonitor:
             self._lost_at = self._clock()
         self.connected = False
         self.voltage = None
+        self._input_source = None
+        self._drop_low()
 
     async def _session(self) -> None:
         timeout = aiohttp.ClientTimeout(total=None, connect=20, sock_read=None)
@@ -147,7 +158,8 @@ class PowerMonitor:
                     "id": SUBSCRIPTION_ID,
                     "type": "subscribe_entities",
                     "entity_ids": [self._config.voltage_entity, self._config.battery_entity,
-                                   self._config.battery_power_entity],
+                                   self._config.battery_power_entity]
+                                  + ([self._config.input_source_entity] if self._config.input_source_entity else []),
                 })
                 self.connected = True
                 logger.info("Connected to Home Assistant, subscribed to power sensors")
@@ -180,8 +192,11 @@ class PowerMonitor:
         event = message.get("event") or {}
         added = event.get("a") or {}
         changed = event.get("c") or {}
-        # Battery first, so a transition in the same message reports the current level.
-        for entity in (self._config.battery_entity, self._config.battery_power_entity, self._config.voltage_entity):
+        # Battery first, so a transition in the same message reports the current level; the input source before the
+        # voltage, so a snapshot's 0 V is judged by the input it came with.
+        entities = (self._config.battery_entity, self._config.battery_power_entity, self._config.input_source_entity,
+                    self._config.voltage_entity)
+        for entity in filter(None, entities):
             if entity in added:
                 state = added[entity]
                 await self._observe(entity, state.get("s"), state.get("lc") or state.get("lu"), from_snapshot=True)
@@ -198,19 +213,73 @@ class PowerMonitor:
         if entity == self._config.battery_power_entity:
             self.battery_w = parse_number(value)
             return
+        if entity == self._config.input_source_entity:
+            self._input_source = value if isinstance(value, str) else None
+            await self._settle()
+            return
         self.voltage = parse_number(value)
         status = parse_voltage(value, self._config.min_voltage)
         if status is None:
-            if not self._warned_unavailable:
-                logger.warning(f"Voltage sensor has no usable value ({value!r}), ignoring until it recovers")
-                self._warned_unavailable = True
+            self._drop_low()
+            self._unusable(f"Voltage sensor has no usable value ({value!r})")
             return
+        changed_at = datetime.fromtimestamp(changed_ts, KYIV_TZ) if changed_ts else self._clock()
+        if status is PowerStatus.OFF and self._config.input_source_entity:
+            self._low = (changed_at, from_snapshot)
+            await self._settle()
+            return
+        self._drop_low()
+        await self._take(status, changed_at, from_snapshot)
+
+    async def _settle(self) -> None:
+        """Decides a 0 V reading by the AC input: an outage once it reads NOT_CONNECTED, no reading at all while it
+        reads UNKNOWN (the GX has no data from the inverter), otherwise an outage after CONFIRM_S."""
+        if self._low is None:
+            return
+        if self._input_source == INPUT_UNKNOWN:
+            self._cancel_confirm()
+            self._unusable("The GX has no data from the inverter (input source UNKNOWN), so its 0 V is no outage")
+            return
+        if self._input_source == INPUT_NOT_CONNECTED:
+            changed_at, from_snapshot = self._low
+            self._drop_low()
+            await self._take(PowerStatus.OFF, changed_at, from_snapshot)
+            return
+        if self._confirm is None:
+            self._confirm = asyncio.create_task(self._confirm_later())
+
+    async def _confirm_later(self) -> None:
+        await asyncio.sleep(self.CONFIRM_S)
+        self._confirm = None
+        low, self._low = self._low, None
+        if low is None:
+            return
+        logger.warning(f"0 V and the input source still {self._input_source!r} after {self.CONFIRM_S:.0f}s: "
+                       f"taking it as an outage")
+        try:
+            await self._take(PowerStatus.OFF, *low)
+        except Exception as e:
+            logger.error(f"Power OFF after the input source wait failed: {type(e).__name__}: {e}")
+
+    async def _take(self, status: PowerStatus, changed_at: datetime, from_snapshot: bool) -> None:
         self._warned_unavailable = False
         if self._state is not None and status == self._state.status:
             return
-        now = self._clock()
-        changed_at = datetime.fromtimestamp(changed_ts, KYIV_TZ) if changed_ts else now
-        await self.apply(status, changed_at, now, from_snapshot)
+        await self.apply(status, changed_at, self._clock(), from_snapshot)
+
+    def _unusable(self, why: str) -> None:
+        if not self._warned_unavailable:
+            logger.warning(f"{why}; ignoring until it recovers")
+            self._warned_unavailable = True
+
+    def _drop_low(self) -> None:
+        self._low = None
+        self._cancel_confirm()
+
+    def _cancel_confirm(self) -> None:
+        if self._confirm is not None:
+            self._confirm.cancel()
+            self._confirm = None
 
     async def apply(self, status: PowerStatus, changed_at: datetime, now: datetime, from_snapshot: bool) -> None:
         async with self._store.transaction() as tx:

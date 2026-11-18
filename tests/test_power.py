@@ -1,10 +1,13 @@
+import asyncio
+
 import pytest
 
+from app.config import load_settings
 from app.notify.router import Router
 from app.power.monitor import PowerMonitor
 from app.power.state import PowerState, PowerStatus, next_state, parse_voltage
 from app.storage.memory import MemoryStore
-from tests.conftest import kyiv, one, snapshot
+from tests.conftest import BASE_ENV, kyiv, one, snapshot
 
 
 def test_voltage_parsing():
@@ -53,12 +56,13 @@ async def test_subscription_snapshot_then_live_changes(monitor):
     mon, store, clock = monitor
     store.data.power = PowerState(PowerStatus.ON, kyiv(2026, 9, 30, 2, 50))
     await mon.restore()
-    v, b = mon._config.voltage_entity, mon._config.battery_entity
+    v, b, src = mon._config.voltage_entity, mon._config.battery_entity, mon._config.input_source_entity
 
     # Initial snapshot on subscribe: power is on, nothing to report.
     await mon._handle({"id": 1, "type": "event", "event": {"a": {
         v: {"s": "231.8", "lc": kyiv(2026, 10, 1, 15).timestamp()},
         b: {"s": "100.0", "lc": kyiv(2026, 10, 1, 8).timestamp()},
+        src: {"s": "GRID", "lc": kyiv(2026, 10, 1, 15).timestamp()},
     }}})
     assert store.queued() == []
 
@@ -68,6 +72,7 @@ async def test_subscription_snapshot_then_live_changes(monitor):
 
     went_off = kyiv(2026, 10, 1, 16, 0, 30)
     await mon._handle({"id": 1, "type": "event", "event": {"c": {v: {"+": {"s": "0.0", "lc": went_off.timestamp()}}}}})
+    await mon._handle({"id": 1, "type": "event", "event": {"c": {src: {"+": {"s": "NOT_CONNECTED"}}}}})
     queued = store.queued()
     assert [m.chat_id for m in queued] == ["111", "222"]
     assert "POWER OUTAGE" in queued[0].text and "⚡ Scheduled" in queued[0].text
@@ -102,7 +107,127 @@ async def test_home_battery_follows_ha(monitor):
 async def test_empty_database_is_initialised_silently(monitor):
     mon, store, _ = monitor
     await mon.restore()
-    v = mon._config.voltage_entity
-    await mon._handle({"id": 1, "type": "event", "event": {"a": {v: {"s": "0.0", "lc": kyiv(2026, 10, 1, 9).timestamp()}}}})
+    v, src = mon._config.voltage_entity, mon._config.input_source_entity
+    await mon._handle({"id": 1, "type": "event", "event": {"a": {
+        v: {"s": "0.0", "lc": kyiv(2026, 10, 1, 9).timestamp()},
+        src: {"s": "NOT_CONNECTED", "lc": kyiv(2026, 10, 1, 9).timestamp()},
+    }}})
     assert store.queued() == []
     assert store.data.power.status is PowerStatus.OFF
+
+
+# ---- 0 V judged by the AC input (sequences as Home Assistant recorded them at home) ----
+
+async def send(mon, at=None, **values):
+    names = {"v": mon._config.voltage_entity, "src": mon._config.input_source_entity}
+    changed = {}
+    for key, value in values.items():
+        plus = {"s": value}
+        if at is not None:
+            plus["lc"] = at.timestamp()
+        changed[names[key]] = {"+": plus}
+    await mon._handle({"id": 1, "type": "event", "event": {"c": changed}})
+
+
+@pytest.fixture
+async def powered(monitor):
+    mon, store, clock = monitor
+    clock["now"] = kyiv(2026, 11, 18, 3)
+    store.data.power = PowerState(PowerStatus.ON, kyiv(2026, 11, 15, 23, 31))
+    await mon.restore()
+    mon.connected = True
+    await mon._handle({"id": 1, "type": "event", "event": {"a": {
+        mon._config.voltage_entity: {"s": "232.8", "lc": kyiv(2026, 11, 15, 23, 31).timestamp()},
+        mon._config.input_source_entity: {"s": "GRID", "lc": kyiv(2026, 11, 15, 23, 31).timestamp()},
+    }}})
+    yield mon, store, clock
+    mon._disconnected()
+
+
+async def test_outage_waits_for_the_input_to_say_not_connected(powered):
+    # 17.11.2026: the voltage read 0 at 08:05:31, the input NOT_CONNECTED at 08:05:33.
+    mon, store, clock = powered
+    went_off = kyiv(2026, 11, 17, 8, 5, 31)
+    await send(mon, went_off, v="0.0")
+    assert store.queued() == [] and store.data.power.status is PowerStatus.ON
+    await send(mon, kyiv(2026, 11, 17, 8, 5, 33), src="NOT_CONNECTED")
+    assert len(store.queued()) == 2
+    assert store.data.power == PowerState(PowerStatus.OFF, went_off)
+
+
+async def test_outage_with_the_input_in_the_same_message(powered):
+    # 16.11.2026 00:26:26: both changed in the same second.
+    mon, store, _ = powered
+    went_off = kyiv(2026, 11, 16, 0, 26, 26)
+    await send(mon, went_off, v="0.0", src="NOT_CONNECTED")
+    assert store.data.power == PowerState(PowerStatus.OFF, went_off) and len(store.queued()) == 2
+
+
+async def test_a_gx_without_inverter_data_is_no_outage(powered):
+    # 18.11.2026 00:50: a Remote VEConfigure download. The voltage read 0 a second before the input read UNKNOWN,
+    # then went unavailable, read 0 once more and came back; the input read GRID again last.
+    mon, store, clock = powered
+    await send(mon, kyiv(2026, 11, 18, 0, 50, 37), v="0.0")
+    await send(mon, kyiv(2026, 11, 18, 0, 50, 37), src="UNKNOWN")
+    assert mon.energy_reading(clock["now"]) is None
+    await send(mon, v="unavailable")
+    await send(mon, kyiv(2026, 11, 18, 0, 51, 41), v="0.0")
+    await send(mon, kyiv(2026, 11, 18, 0, 51, 42), v="232.8")
+    await send(mon, kyiv(2026, 11, 18, 0, 51, 43), src="GRID")
+    assert store.queued() == [] and store.data.power.status is PowerStatus.ON
+    assert mon.energy_reading(clock["now"]).power is True
+
+
+async def test_a_gx_restart_is_no_outage(powered):
+    # 18.11.2026 02:14: everything unavailable, the input UNKNOWN, the voltage 0 afterwards, both back together.
+    mon, store, _ = powered
+    await send(mon, v="unavailable", src="unavailable")
+    await send(mon, src="UNKNOWN")
+    await send(mon, kyiv(2026, 11, 18, 2, 14, 50), v="0.0")
+    await send(mon, kyiv(2026, 11, 18, 2, 14, 58), v="230.8", src="GRID")
+    assert store.queued() == [] and store.data.power.status is PowerStatus.ON
+    assert mon._confirm is None
+
+
+async def test_a_snapshot_taken_while_the_gx_has_no_data(monitor):
+    mon, store, _ = monitor
+    store.data.power = PowerState(PowerStatus.ON, kyiv(2026, 11, 17, 22, 16))
+    await mon.restore()
+    await mon._handle({"id": 1, "type": "event", "event": {"a": {
+        mon._config.voltage_entity: {"s": "0.0", "lc": kyiv(2026, 11, 18, 2, 2, 6).timestamp()},
+        mon._config.input_source_entity: {"s": "UNKNOWN", "lc": kyiv(2026, 11, 18, 2, 2, 7).timestamp()},
+    }}})
+    assert store.queued() == [] and store.data.power.status is PowerStatus.ON
+    assert mon._confirm is None
+
+
+async def test_0v_is_an_outage_after_a_while_when_the_input_never_says(powered):
+    mon, store, _ = powered
+    mon.CONFIRM_S = 0.01
+    went_off = kyiv(2026, 11, 17, 8, 5, 31)
+    await send(mon, went_off, v="0.0")
+    assert store.data.power.status is PowerStatus.ON
+    await asyncio.sleep(0.05)
+    assert store.data.power == PowerState(PowerStatus.OFF, went_off) and len(store.queued()) == 2
+
+
+async def test_the_input_turning_unknown_stops_the_wait(powered):
+    mon, store, _ = powered
+    mon.CONFIRM_S = 0.01
+    await send(mon, kyiv(2026, 11, 18, 2, 2, 6), v="0.0")
+    await send(mon, src="UNKNOWN")
+    await asyncio.sleep(0.05)
+    assert store.queued() == [] and store.data.power.status is PowerStatus.ON
+
+
+async def test_without_an_input_entity_the_voltage_alone_decides(settings):
+    store = MemoryStore()
+    store.data.power = PowerState(PowerStatus.ON, kyiv(2026, 11, 17, 22, 16))
+    config = load_settings({**BASE_ENV, "HA_INPUT_SOURCE_ENTITY": "none"}).power
+    assert config.input_source_entity is None
+    mon = PowerMonitor(config, store, Router(settings), snapshot=lambda: None, clock=lambda: kyiv(2026, 11, 18, 3))
+    await mon.restore()
+    went_off = kyiv(2026, 11, 18, 2, 2, 6)
+    await mon._handle({"id": 1, "type": "event", "event": {"c": {
+        config.voltage_entity: {"+": {"s": "0.0", "lc": went_off.timestamp()}}}}})
+    assert store.data.power == PowerState(PowerStatus.OFF, went_off)

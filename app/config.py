@@ -52,6 +52,9 @@ class PowerConfig:
     battery_power_entity: str   # positive while charging; for the mini app's batteries row
     source: str             # whose schedule and chats the power messages use
     min_voltage: float
+    # The inverter's AC input as Venus reports it; a 0 V reading only counts as an outage once it says
+    # NOT_CONNECTED (app/power/monitor.py). None: the voltage alone decides.
+    input_source_entity: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,11 @@ def _get(env: Mapping[str, str], key: str, default: Optional[str] = None) -> Opt
     if value is None or not value.strip():
         return default
     return value.strip()
+
+
+def _input_source_entity(env: Mapping[str, str]) -> Optional[str]:
+    entity = _get(env, "HA_INPUT_SOURCE_ENTITY", "sensor.victron_system_input_source")
+    return None if entity.lower() == "none" else entity
 
 
 def _require(env: Mapping[str, str], key: str) -> str:
@@ -223,6 +231,7 @@ def load_settings(env: Optional[Mapping[str, str]] = None) -> Settings:
             battery_power_entity=_get(env, "HA_BATTERY_POWER_ENTITY", "sensor.victron_system_battery_power"),
             source=power_source,
             min_voltage=float(_get(env, "POWER_MIN_VOLTAGE", "50")),
+            input_source_entity=_input_source_entity(env),
         )
 
     deye = None
