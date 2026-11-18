@@ -305,11 +305,11 @@ class PostgresStore:
         )
         return [OutboxItem(**dict(r)) for r in rows]
 
-    async def mark_sent(self, item_id: int, at: datetime) -> None:
+    async def mark_sent(self, item_id: int, at: datetime, note: Optional[str] = None) -> None:
         assert self._pool is not None
         await self._pool.execute(
-            "UPDATE notification_outbox SET sent_at = $2, attempts = attempts + 1, last_error = NULL WHERE id = $1",
-            item_id, at,
+            "UPDATE notification_outbox SET sent_at = $2, attempts = attempts + 1, last_error = $3 WHERE id = $1",
+            item_id, at, note,
         )
 
     async def mark_retry(self, item_id: int, error: str, next_attempt_at: datetime) -> None:

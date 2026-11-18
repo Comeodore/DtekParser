@@ -173,7 +173,10 @@ tunnel. The service picks the saved cookies up on its next attempt.
   notification.
 - Messages go through `notification_outbox`. Delivery retries with backoff,
   keeps per-chat order, honours Telegram rate limits, and drops a message
-  after 6 h rather than sending it stale.
+  after 6 h rather than sending it stale. A send whose answer timed out
+  (`httpx.ReadTimeout`) is not repeated: Telegram had the request and
+  delivers it late, and a retry showed it twice. It is marked sent with
+  `last_error` starting `unconfirmed:`.
 - A Postgres advisory lock allows only one instance per schema. Its sessions
   ask Postgres to probe the client after a minute idle, so the lock of an
   instance that vanished with the network frees in about 90 s, not after the

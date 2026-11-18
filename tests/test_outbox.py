@@ -2,7 +2,10 @@ from datetime import timedelta
 
 import pytest
 
-from app.notify.outbox import OutboxSender, PermanentSendError, RetryLater
+import httpx
+from telegram.error import TimedOut
+
+from app.notify.outbox import MaybeDelivered, OutboxSender, PermanentSendError, RetryLater, TelegramGateway
 from app.notify.router import OutgoingMessage
 from app.storage.memory import MemoryStore
 from tests.conftest import kyiv
@@ -89,3 +92,74 @@ async def test_fresh_message_is_due_regardless_of_clock_skew(env):
     await enqueue(store, ("1", "a"))
     clock["now"] = T0 - timedelta(hours=1)
     assert await sender.flush() == 1
+
+
+async def test_unanswered_send_is_not_repeated_and_does_not_block_the_chat(env):
+    # 18.11.2026: Telegram delivered requests whose answer timed out a minute or two later, so a retry doubled them.
+    store, gateway, clock, sender = env
+    gateway.failures["a"] = [MaybeDelivered("no answer")]
+    await enqueue(store, ("1", "a"), ("1", "b"))
+    assert await sender.flush() == 2
+    assert gateway.sent == [("bot", "1", "b")]
+    assert store.sent_texts("1") == ["a", "b"]
+    assert store.data.outbox[1]["error"] == "unconfirmed: no answer"
+    clock["now"] = T0 + timedelta(minutes=10)
+    assert await sender.flush() == 0
+
+
+def _timed_out(cause: Exception) -> TimedOut:
+    try:
+        raise TimedOut() from cause
+    except TimedOut as e:
+        return e
+
+
+class FakeBot:
+    def __init__(self, error: Exception):
+        self.error = error
+
+    async def send_message(self, **kwargs):
+        raise self.error
+
+
+@pytest.mark.parametrize("cause, expected", [
+    (httpx.ReadTimeout("read"), MaybeDelivered),
+    (httpx.ConnectTimeout("connect"), RetryLater),
+    (httpx.WriteTimeout("write"), RetryLater),
+    (httpx.PoolTimeout("pool"), RetryLater),
+])
+async def test_gateway_tells_a_lost_answer_from_a_request_never_taken(cause, expected):
+    gateway = TelegramGateway({"bot": "token"})
+    gateway._bots["bot"] = FakeBot(_timed_out(cause))
+    with pytest.raises(expected):
+        await gateway.send("bot", "1", "a")
+
+
+async def test_gateway_retries_a_read_timeout_while_initialising(monkeypatch):
+    # getMe timing out sent nothing to the chat.
+    from telegram import Bot
+
+    async def initialize(self):
+        raise _timed_out(httpx.ReadTimeout("read"))
+
+    monkeypatch.setattr(Bot, "initialize", initialize)
+    with pytest.raises(RetryLater):
+        await TelegramGateway({"bot": "123:abc"}).send("bot", "1", "a")
+
+
+async def test_gateway_sees_the_read_timeout_through_python_telegram_bot(monkeypatch):
+    from telegram import Bot
+    from telegram.request import HTTPXRequest
+
+    async def request(self, *args, **kwargs):
+        raise httpx.ReadTimeout("read")
+
+    async def no_init(self):
+        pass
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", request)
+    monkeypatch.setattr(Bot, "initialize", no_init)
+    gateway = TelegramGateway({"bot": "123:abc"})
+    gateway._bots["bot"] = Bot("123:abc", request=HTTPXRequest())
+    with pytest.raises(MaybeDelivered):
+        await gateway.send("bot", "1", "a")

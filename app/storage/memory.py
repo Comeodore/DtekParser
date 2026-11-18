@@ -95,9 +95,9 @@ class MemoryStore:
         pending = [r["item"] for r in self.data.outbox.values() if r["sent_at"] is None and r["failed_at"] is None]
         return sorted(pending, key=lambda i: i.id)[:limit]
 
-    async def mark_sent(self, item_id: int, at: datetime) -> None:
+    async def mark_sent(self, item_id: int, at: datetime, note: Optional[str] = None) -> None:
         row = self.data.outbox[item_id]
-        row["sent_at"] = at
+        row["sent_at"], row["error"] = at, note
         row["item"] = replace(row["item"], attempts=row["item"].attempts + 1)
 
     async def mark_retry(self, item_id: int, error: str, next_attempt_at: datetime) -> None:

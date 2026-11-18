@@ -1,4 +1,10 @@
-"""Delivers queued messages to Telegram, at least once and in order per chat."""
+"""Delivers queued messages to Telegram, in order per chat.
+
+A failed send is retried, except when Telegram took the request and only its answer timed out: the Bot API has no
+idempotency key, and on 18.11.2026 such requests reached the chat a minute or two later, so a retry showed the
+message twice. 502 answers and connection errors are still retried; that day's counts fit every timed-out request
+arriving and no 502 one.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -21,6 +27,10 @@ class RetryLater(Exception):
     def __init__(self, message: str, delay: Optional[float] = None):
         super().__init__(message)
         self.delay = delay
+
+
+class MaybeDelivered(Exception):
+    """Telegram received the request but did not answer in time; it usually delivers it late."""
 
 
 class Gateway(Protocol):
@@ -46,14 +56,21 @@ class TelegramGateway:
         return self._bots[name]
 
     async def send(self, bot: str, chat_id: str, text: str) -> None:
-        from telegram.error import BadRequest, ChatMigrated, Forbidden, InvalidToken, RetryAfter, TelegramError
+        import httpx
+        from telegram.error import (BadRequest, ChatMigrated, Forbidden, InvalidToken, RetryAfter, TelegramError,
+                                    TimedOut)
 
         if self._dry_run:
             logger.info(f"[dry-run] {bot} -> {chat_id}:\n{text}")
             return
         try:
             client = await self._bot(bot)
-            await client.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+            try:
+                await client.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
+            except TimedOut as e:
+                if isinstance(e.__cause__, httpx.ReadTimeout):
+                    raise MaybeDelivered("Telegram took the message but did not answer in time") from e
+                raise
         except RetryAfter as e:
             delay = e.retry_after.total_seconds() if isinstance(e.retry_after, timedelta) else float(e.retry_after)
             raise RetryLater(f"rate limited: {e}", delay) from e
@@ -129,6 +146,11 @@ class OutboxSender:
                 continue
             try:
                 await self._gateway.send(item.bot, item.chat_id, item.text)
+            except MaybeDelivered as e:
+                logger.warning(f"Message #{item.id} to {item.chat_id}: {e}; not sending it again")
+                await self._store.mark_sent(item.id, self._clock(), note=f"unconfirmed: {e}")
+                sent += 1
+                continue
             except PermanentSendError as e:
                 logger.error(f"Message #{item.id} to {item.chat_id} failed permanently: {e}")
                 await self._store.mark_failed(item.id, str(e), self._clock())
